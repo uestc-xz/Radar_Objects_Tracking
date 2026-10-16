@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Models
+*.pth
+*.pt
+
+# Test results
+test_results*/
+test_results_detr*/
+
+# IDE
+.idea/
+.vscode/
+
+# Local Git worktrees
+.worktrees/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (not in repo)
+E:/Jupyter/track/
