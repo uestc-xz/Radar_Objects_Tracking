@@ -125,61 +125,6 @@ class DecoderLayer(nn.Module):
         ffn_out = self.norm3(cross_attn_out + ffn_output)  # [B, num_queries, d_model]
 
         return ffn_out
-    # def forward(self, dec_input, enc_output):
-    #     # dec_input: 解码器输入 [B, num_queries, d_model]
-    #     # enc_output: 编码器输出 [B, T, d_model]
-    #     batch_size, num_queries, _ = dec_input.shape
-    #     _, time_steps, _ = enc_output.shape
-    #
-    #     # 1. 自注意力 (Self-Attention) - 保持不变
-    #     qkv = self.self_attn_qkv(dec_input)
-    #     qkv = qkv.reshape(batch_size, num_queries, 3, self.num_heads, self.head_dim)
-    #     q, k, v = qkv.unbind(2)
-    #     q = q.transpose(1, 2)
-    #     k = k.transpose(1, 2)
-    #     v = v.transpose(1, 2)
-    #     mask = torch.triu(torch.ones(num_queries, num_queries), diagonal=1).bool().to(dec_input.device)
-    #
-    #     attn_weights = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-    #     attn_weights = attn_weights.masked_fill(mask, -1e9)
-    #     attn_weights = torch.softmax(attn_weights, dim=-1)
-    #
-    #     attn_output = attn_weights @ v
-    #     attn_output = attn_output.transpose(1, 2).contiguous().reshape(batch_size, num_queries, self.d_model)
-    #     attn_output = self.self_attn_out(attn_output)
-    #     self_attn_out = self.norm1(dec_input + attn_output)
-    #
-    #     # 2. 交叉注意力 (Cross-Attention)
-    #     q = self.cross_attn_q(self_attn_out)
-    #     kv = self.cross_attn_kv(enc_output)
-    #
-    #     q = q.reshape(batch_size, num_queries, self.num_heads, self.head_dim).transpose(1, 2)
-    #     kv = kv.reshape(batch_size, time_steps, 2, self.num_heads, self.head_dim)
-    #     k, v = kv.unbind(2)
-    #     k = k.transpose(1, 2)
-    #     v = v.transpose(1, 2)
-    #
-    #     # 计算注意力权重 [B, num_heads, num_queries, T]
-    #     cross_attn_weights = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-    #     cross_attn_weights = torch.softmax(cross_attn_weights, dim=-1)  # <--- 我们需要的权重张量
-    #
-    #     cross_attn_output = cross_attn_weights @ v
-    #     cross_attn_output = cross_attn_output.transpose(1, 2).contiguous().reshape(batch_size, num_queries,
-    #                                                                                self.d_model)
-    #     cross_attn_output = self.cross_attn_out(cross_attn_output)
-    #
-    #     cross_attn_out = self.norm2(self_attn_out + cross_attn_output)  # [B, num_queries, d_model]
-    #
-    #     # 3. 前馈网络 (FFN)
-    #     ffn_output = self.ffn(cross_attn_out)
-    #     ffn_out = self.norm3(cross_attn_out + ffn_output)  # [B, num_queries, d_model]
-    #
-    #     # 【修改 1】：将多头注意力权重平均到单头，形状变为 [B, num_queries, T]
-    #     # 这一步是为了方便后续的单图可视化（48个特征点）
-    #     mean_cross_attn_weights = cross_attn_weights.mean(dim=1)
-    #
-    #     # 【修改 2】：返回两个值：最终输出和平均注意力权重
-    #     return ffn_out, mean_cross_attn_weights
 
 class Decoder(nn.Module):
     def __init__(self, d_model=128, num_queries=1, num_layers=2):
@@ -271,34 +216,3 @@ class Decoder(nn.Module):
         layer_conf_preds = [self.conf_head(out) for out in layer_outputs]
         # print("每层layer_pred形状:", [p.shape for p in layer_preds])
         return layer_preds,layer_class_preds,layer_conf_preds,dec_output
-    # def forward(self, enc_output):
-    #     """
-    #     enc_output: 编码器输出 [B, T, d_model]
-    #     return: 预测的坐标 [B, num_queries, 2]
-    #     """
-    #     batch_size = enc_output.shape[0]
-    #     # 扩展查询向量到批次维度
-    #     queries = self.object_queries.unsqueeze(0).repeat(batch_size, 1, 1)  # [B, num_queries, d_model]
-    #     # 添加位置编码
-    #     queries = queries + self.query_pos_enc.to(queries.device)  # [B, num_queries, d_model]
-    #
-    #     layer_outputs = []
-    #     cross_attn_weights = []  # <--- 新增：用于收集每层权重
-    #
-    #     # 逐层通过解码器
-    #     dec_output = queries
-    #
-    #     # 假设 DecoderLayer 现在返回 (dec_output, attn_weights)
-    #     for layer in self.decoder_layers:
-    #         dec_output, attn_weights = layer(dec_input=dec_output, enc_output=enc_output)  # <--- 修改：接收两个返回值
-    #
-    #         layer_outputs.append(dec_output)
-    #         cross_attn_weights.append(attn_weights)  # <--- 新增：收集权重
-    #
-    #     # 生成坐标预测 (保持不变)
-    #     layer_preds = [torch.cat([self.coord_headx(out), self.coord_heady(out)], dim=1) for out in layer_outputs]
-    #     layer_class_preds = [self.classifier(out) for out in layer_outputs]
-    #     layer_conf_preds = [self.conf_head(out) for out in layer_outputs]
-    #
-    #     # 【关键修改】：返回 5 个值
-    #     return layer_preds, layer_class_preds, layer_conf_preds, dec_output, cross_attn_weights

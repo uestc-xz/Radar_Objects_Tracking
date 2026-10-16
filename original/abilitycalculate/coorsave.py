@@ -1,8 +1,7 @@
 import matplotlib.pyplot as plt
 import os
 import torch
-from original.lossfunc import hungarian_loss ,hungarian_loss_with_matches
-from original.my_dataset import process_temporal_labels
+# from original.my_dataset import process_temporal_labels
 from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
 from original.my_dataset import add_wh_to_targets
@@ -378,103 +377,7 @@ def save_overall_stats(avg_total_loss, avg_bbox_loss, avg_conf_loss,
         f.write(f"  正确检测: {detected_objects}\n")
         f.write(f"  误检数量: {false_positives}\n")
         f.write(f"  检测率: {detected_objects / total_objects:.4f}\n")
-# def test_and_write_results_simple(model, test_loader, device, save_dir='test_results'):
-#     """测试并保存结果txt（简洁格式）"""
-#     model.eval()
-#
-#     os.makedirs(save_dir, exist_ok=True)
-#     result_file = open(os.path.join(save_dir, 'results.txt'), 'w')
-#
-#     with torch.no_grad():
-#         for batch_idx, (radar_data, coordinates) in enumerate(tqdm(test_loader, desc='Testing')):
-#             radar_data = radar_data.to(device)
-#             pred = model(radar_data)
-#
-#             # 处理标签
-#             B, T, C = coordinates.shape
-#             target_coords_with_wh = []
-#             for i in range(B):
-#                 avg_coords = coordinates[i].mean(dim=0)
-#                 avg_coords_reshaped = avg_coords.reshape(-1, 2)
-#                 coords_with_wh = add_wh_to_targets(avg_coords_reshaped)
-#                 target_coords_with_wh.append(coords_with_wh)
-#
-#             target_coords_with_wh = torch.stack(target_coords_with_wh).to(device)
-#
-#             for sample_idx in range(B):
-#                 pred_current = pred[sample_idx]
-#                 target_current = target_coords_with_wh[sample_idx]
-#
-#                 # 匈牙利匹配
-#                 is_invalid = torch.all(torch.isclose(target_current[:, :2],
-#                                                      torch.tensor([0.0, 0.0], device=pred.device)), dim=1)
-#                 valid_mask = ~is_invalid
-#                 valid_targets = target_current[valid_mask]
-#
-#                 if len(valid_targets) > 0:
-#                     pred_points = pred_current[:, :2]
-#                     dist_matrix = torch.cdist(valid_targets[:, :2], pred_points, p=2)
-#                     row_idx, col_idx = linear_sum_assignment(dist_matrix.detach().cpu().numpy())
-#
-#                     # 创建匹配后的预测数组
-#                     matched_pred = torch.zeros_like(valid_targets)
-#                     matched_pred[row_idx] = pred_current[col_idx]
-#
-#                 # 写入同一行：样本ID + 标签 + 预测
-#                 sample_id = batch_idx * B + sample_idx
-#                 line = f"Sample_{sample_id}: "
-#
-#                 # 标签
-#                 line += "Label["
-#                 for i in range(len(valid_targets)):
-#                     x, y, w, h = valid_targets[i].cpu().numpy()
-#                     line += f"({x:.4f},{y:.4f})"
-#                     if i < len(valid_targets) - 1:
-#                         line += ","
-#                 line += "] "
-#
-#                 # 预测
-#                 line += "Pred["
-#                 for i in range(len(matched_pred)):
-#                     x, y, w, h = matched_pred[i].cpu().numpy()
-#                     line += f"({x:.4f},{y:.4f})"
-#                     if i < len(matched_pred) - 1:
-#                         line += ","
-#                 line += "]"
-#
-#                 result_file.write(line + '\n')
-#
-#     result_file.close()
-#     print(f"结果已保存到 {save_dir}/results.txt")
 
-def new_complete_loss(pred_boxes, pred_confidence, target_boxes):
-    """
-    pred_boxes: [B, num_queries, 4]
-    pred_confidence: [B, num_queries, 1]
-    target_boxes: [B, num_targets, 4]
-    """
-    batch_size = pred_boxes.shape[0]
-    total_bbox_loss = 0
-    total_confidence_loss = 0
-
-    for b in range(batch_size):
-        # 只做一次匈牙利匹配！！！
-        bbox_loss, matched_indices = hungarian_loss_with_matches(
-            pred_boxes[b:b + 1], target_boxes[b:b + 1]
-        )
-        total_bbox_loss += bbox_loss
-
-        # 使用同一个匹配结果计算置信度损失
-        conf_loss = compute_confidence_loss_single(
-            pred_confidence[b], matched_indices
-        )
-        total_confidence_loss += conf_loss
-
-    avg_bbox_loss = total_bbox_loss / batch_size
-    avg_conf_loss = total_confidence_loss / batch_size
-    total_loss = avg_bbox_loss + avg_conf_loss
-
-    return total_loss, avg_bbox_loss, avg_conf_loss
 
 
 def compute_confidence_loss_single(pred_confidence, matches):

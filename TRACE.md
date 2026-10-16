@@ -9,15 +9,16 @@
 |---|---|
 | 分支 | `master` |
 | 哈希 | `git rev-parse HEAD` |
-| 名称 | `original-定位基线` |
+| 名称 | `original-定位基线-清理版` |
 | 自述 | `SPEC.md`（数据/网络/损失/超参完整描述） |
-| 内容 | `original/`（已发表定位功能）+ 文档 |
+| 内容 | `original/`（已发表定位功能，已剔除遗留代码）+ 文档 |
 
 ## 时间线
 
 | 哈希(短) | 名称 | 状态 | 一句话自述 |
 |---|---|---|---|
-| `git rev-parse --short HEAD` | `original-定位基线` | 当前 | 唯一根节点：仅 `original/` + 文档 |
+| `51ec2fe` | `original-定位基线` | 上一节点 | 唯一根节点：仅 `original/` + 文档 |
+| `git rev-parse --short HEAD` | `original-定位基线-清理版` | 当前 | 剔除 `original/` 遗留模块与未使用代码 |
 
 ## 前进
 

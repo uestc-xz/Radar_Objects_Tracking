@@ -1,1 +1,1 @@
-from .simpletrain import simpletrain
+from .simpletrain import train_epoch_with_temporal_avg,validate_with_temporal_avg

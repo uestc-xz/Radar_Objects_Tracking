@@ -8,7 +8,7 @@
 - 单样本信号：`complex64 (8,89,10)`；89 为距离单元，10 为样本内部雷达时间步，复数保存实部和虚部。
 - 原始标签：`float32 (10,6)`；对 10 行取平均后重构为 `(3,2)`，全零槽 `(0,0)` 表示无目标。
 - 坐标单位为米；当前快速数据集中的有效 `y` 已加 `3.5 m` 偏移，不得重复添加。抽样覆盖全部序列后，有效 `y` 约为 `0.98–6.02 m`。
-- 探测区域（物理边界）：`x ∈ [-2.7, 2.7] m`，`y ∈ [0.8, 6.2] m`（硬编码于 `toheatmap.py`、`YoLostylelabel.py`，与 CODE_LOG 一致）。
+- 探测区域（物理边界）：`x ∈ [-2.7, 2.7] m`，`y ∈ [0.8, 6.2] m`（实测范围，与 CODE_LOG 一致）。
 - 文件夹命名为 `日期_人数_序号`；同一文件夹是一条独立雷达记录，样本按数字文件名连续排列。
 - 训练集含 `新建文件夹`、`新建文件夹 (2)` 两个可疑目录（可能为空或测试数据），读取前需确认。
 - 相邻 `.npy` 约间隔 24–25 ms，40 个样本约 1 秒；禁止跨文件夹构造时间序列。
@@ -40,17 +40,11 @@ test_dataset = load_fast_dataset1(
 
 ### 2.2 标签后处理（训练循环内）
 
-`original/123ren.py` 的 `train_epoch_with_temporal_avg` / `validate_with_temporal_avg`：
+`original/my_train/simpletrain.py` 的 `train_epoch_with_temporal_avg` / `validate_with_temporal_avg`：
 
 1. `coordinates[i].mean(dim=0)`：把 `(10,6)` 的 10 帧平均 → `(6,)`；
 2. `.reshape(-1, 2)` → `(3,2)`；
 3. `add_wh_to_targets(coords, normalize_coords=False)`（定义在 `original/my_dataset/YoLostylelabel.py`）→ `(3,4)` = `[x, y, w, h]`，固定宽高 `w=h=0.4`，全零槽保持为零。
-
-### 2.3 其它数据集类（历史遗留）
-
-> `original/my_dataset/` 下还有 `NpyDataset5`、`NpyDataset5_addnoise`、`FastNpyDataset`、
-> `MyYoLoSytle`、`process_temporal_labels`、`Config` 等，`123ren.py` 顶部 import 但
-> `__main__` 未使用，属遗留问题，后续剔除，此处不展开。
 
 ## 3. 网络结构（original/123ren.py 的 `Mymodule`）
 
@@ -96,7 +90,7 @@ complex (8,89,10)
 主流程用 `hungarian_loss_with_classification`（`original/lossfunc/hungarian.py`，
 `123ren.py` 中 `criterion = hungarian_loss_with_classification`）。
 
-调用签名（见 `train_epoch_with_temporal_avg` / `validate_with_temporal_avg`）：
+调用签名（`original/my_train/simpletrain.py` 的 `train_epoch_with_temporal_avg` / `validate_with_temporal_avg`）：
 
     coord_loss, class_loss = criterion(conf, out, target_coords_with_wh, epoch, is_train=...)
 
@@ -134,18 +128,14 @@ complex (8,89,10)
 
 | 文件 | 使用的内容 |
 |---|---|
-| `original/123ren.py` | 主入口：`Mymodule` + 训练/验证/测试 |
+| `original/123ren.py` | 主入口：`Mymodule` + 测试 |
+| `original/my_train/simpletrain.py` | `train_epoch_with_temporal_avg`、`validate_with_temporal_avg` |
 | `original/my_models/CNNBackbone.py` | `SimpleFusionBackbone` |
 | `original/my_models/DETR_Encoder_Decoder.py` | `EncoderLayer`、`Decoder` |
 | `original/my_dataset/fast_sample_dataset.py` | `load_fast_dataset1` → `FastNpyDataset1` |
 | `original/my_dataset/YoLostylelabel.py` | `add_wh_to_targets` |
 | `original/lossfunc/hungarian.py` | `hungarian_loss_with_classification` |
 | `original/abilitycalculate/count_parameters.py` | `count_parameters`（仅打印参数量） |
-
-> `original/` 下其余文件（`old_backbone.py`、`old_version.py`、`npy_dataset5*.py`、
-> `toheatmap.py`、`config.py`、`Tosslosss.py`、`PixelIoU.py`、`simpletrain.py`、
-> `heatmapsave.py`、`coorsave.py` 及 `CNNBackbone.py` 内消融变体）均为历史遗留，
-> 未使用，后续剔除。
 
 ## 8. 已知坑
 
