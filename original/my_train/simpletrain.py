@@ -26,7 +26,7 @@ def validate_with_temporal_avg(model, dataloader, criterion, device):
 
             target_coords_with_wh = torch.stack(target_coords_with_wh).to(device)
 
-            coorout, conf = model(radar_data)
+            coorout, conf, _ = model(radar_data)  # 第三个返回值 feat 用于跟踪，验证时忽略
 
             # 计算损失 - 修正：接收两个返回值
             batch_coord_loss, batch_class_loss = criterion(conf, coorout, target_coords_with_wh,is_train=False)

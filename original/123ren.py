@@ -35,7 +35,7 @@ def test_and_write_result_with_tracking(model, test_loader, device, save_dir='te
             radar_data = radar_data.to(device)
 
             # 模型推理
-            pred_boxes, pred_logits = model(radar_data)
+            pred_boxes, pred_logits, _ = model(radar_data)  # 第三个返回值 feat 用于跟踪，此处忽略
 
             # 处理标签
             B, T, C = coordinates.shape
@@ -253,7 +253,7 @@ def test_and_write_result(model, test_loader, device, save_dir='test_results', c
             radar_data = radar_data.to(device)
 
             # 模型推理
-            pred_boxes, pred_logits = model(radar_data)  # [B, 50, 4], [B, 50, 2]
+            pred_boxes, pred_logits, _ = model(radar_data)  # 第三个返回值 feat 用于跟踪，此处忽略  # [B, 50, 4], [B, 50, 2]
 
             # 处理标签（只是为了显示，不用于匹配）
             B, T, C = coordinates.shape
@@ -371,7 +371,7 @@ class Mymodule(nn.Module):
         self.backbone = SimpleFusionBackbone(input_channels=8, freq_bins=89, time_steps=10)
         self.DETR_Encoder = nn.ModuleList([  # 用ModuleList装多个EncoderLayer
             EncoderLayer(attention_dim=128, attention_heads=8)
-            for _ in range(4)  # 堆叠enc_num_layers层
+            for _ in range(5)  # 堆叠enc_num_layers层（5 层对齐预训练权重 DETR_Encoder.0~.4）
         ])
         self.position_encoding = self._create_sin_cos_encoding(48, 128)
         self.DETR_Decoder = Decoder(
@@ -415,8 +415,8 @@ class Mymodule(nn.Module):
         for enc_layer in self.DETR_Encoder:
             encoder_output = enc_layer(encoder_input_with_pos)
 
-        # 解码器 - 获取所有层输出
-        coor_pred, wh_pred, conf, _ = self.DETR_Decoder(encoder_output)
+        # 解码器 - 获取所有层输出 + 最后一层 embedding（feat=dec_output，供跟踪关联网络 M4/M6 使用）
+        coor_pred, wh_pred, conf, feat = self.DETR_Decoder(encoder_output)
 
         # 训练时返回所有层，测试时只返回最后一层
         if self.training:
@@ -430,12 +430,12 @@ class Mymodule(nn.Module):
                 all_outputs.append((layer_out, conf_layer))
             return all_outputs
         else:
-            # 测试/推理时只返回最后一层（与之前完全一致）
-            coor_out = coor_pred[-1].reshape(batch_size, -1, 2)
-            wh_out = wh_pred[-1].reshape(batch_size, -1, 2)
-            conf_out = conf[-1].reshape(batch_size, -1, 2)
-            out = torch.cat([coor_out, wh_out], dim=2)
-            return out, conf_out
+            # 测试/推理时只返回最后一层；额外返回 feat 供跟踪关联网络(M4/M6)使用
+            coor_out = coor_pred[-1].reshape(batch_size, -1, 2)   # [B,50,2] 中心坐标 (x,y)
+            wh_out = wh_pred[-1].reshape(batch_size, -1, 2)       # [B,50,2] 冗余 classifier logits(未用)
+            conf_out = conf[-1].reshape(batch_size, -1, 2)        # [B,50,2] 两分类 logits
+            out = torch.cat([coor_out, wh_out], dim=2)            # [B,50,4]
+            return out, conf_out, feat                            # feat=[B,50,128]
 
 
 if __name__ == '__main__':
