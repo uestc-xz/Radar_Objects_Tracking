@@ -64,39 +64,24 @@ def associate(S, score=None, gating_threshold=None):
 # ---------------------------------------------------------------------------
 # 2) 监督信号构造（训练）
 # ---------------------------------------------------------------------------
-def build_assignment_targets(pred_boxes, targets):
-    """用匈牙利匹配把 GT 槽位伪 ID 映射为每量测的类标签（与定位损失同口径）。
+def build_assignment_targets(pred_boxes, targets, scores, threshold=0.96):
+    """用「置信度阈值先筛 + 匈牙利匹配」把 GT 槽位伪 ID 映射为每量测的类标签。
+
+    规则（与定位前端置信度阈值的物理含义对齐）：
+        1) s_i < τ 的量测直接判杂波（labels=0），不参与匹配；
+        2) 候选量测（s_i ≥ τ）与真实目标做匈牙利 1 对 1 匹配，匹配上的候选
+           赋对应槽位类（槽位 0..2 → 类 1..3）；
+        3) 候选但未匹配上的，赋「距离它最近的真实目标」对应的槽位类。
 
     Args:
         pred_boxes : [B, 50, 2]  量测中心坐标 (x, y)
         targets    : [B, 3, 2]   GT 槽位中心（(0,0)=空槽，槽位顺序=伪 ID）
+        scores     : [B, 50]     量测置信度 s_i = P(该 query 是目标) ∈ [0,1]
+        threshold  : float       置信度阈值 τ，默认 0.96（前端定位标定值）
 
     Returns:
         labels : [B, 50] long，∈ {0,1,2,3}；0=杂波，j+1=GT 槽位 j
     """
-    # ------------------------------------------------------------------
-    # 【待改】优化方案（暂不实施，先记录需求）——引入置信度阈值「先筛再匹配」
-    #   背景：前端定位实验中，置信度阈值 ≈0.96 以上才视为目标，其余视为杂波
-    #         （阈值来自前端网络损失计算等环节的物理含义 / 经验标定）。
-    #   现状：当前对全部 50 个量测与 valid_targets 做匈牙利匹配，没有阈值概念。
-    #   目标改法：
-    #       1) 先按置信度阈值 τ（≈0.96，建议做成 config 超参）把量测分两拨：
-    #          - s_i < τ  → 直接判杂波，labels=0，不参与匹配；
-    #          - s_i ≥ τ  → 作为候选目标，进入下一步匹配。
-    #       2) 候选目标与 valid_targets（真实目标）做匈牙利 1 对 1 匹配：
-    #          - 匹配上的候选      → 赋对应航迹类（原始槽位 + 1，即 1..3）。
-    #          - 候选但未匹配上的  → 赋「距离它最近的真实目标」对应的航迹类
-    #            （按最近邻 GT 归属，避免被无谓判成杂波）。
-    #   边界情形（n = 真实目标数，1≤n≤3；候选 = 阈值以上的量测数）——通用规则，
-    #   不限于某个具体 n（上文「2 真 + 1 空」仅为例举）：
-    #          - 候选数 = n：一一匹配，无剩余。
-    #          - 候选数 < n：匈牙利匹配 min(候选数, n)=候选数 个，缺失目标本帧无对应量测。
-    #          - 候选数 > n：匈牙利匹配 n 个，多余候选按最近真实目标赋标签。
-    #   前置改动（实施时必须一起改）：
-    #          - 当前签名只有 pred_boxes，缺置信度 → 需新增入参（如 scores/conf），
-    #            并把调用处 _forward_sequence 里的 m_score 传进来。
-    #          - 阈值 τ 建议收敛到超参配置（如 THRESHOLD 常量），默认 0.96 可调。
-    # ------------------------------------------------------------------
     B, M, _ = pred_boxes.shape
     device = pred_boxes.device
     labels = torch.zeros(B, M, dtype=torch.long, device=device)
@@ -112,19 +97,35 @@ def build_assignment_targets(pred_boxes, targets):
         if len(valid_targets) == 0:
             continue                                      # 全空槽 → 所有量测判杂波（labels 保持 0）
 
-        # 与 hungarian_loss_with_classification 同口径：中心欧氏距离做 1 对 1 匹配
-        dist_matrix = torch.cdist(valid_targets, pred_boxes[b], p=2).T   # [M, n]
+        # 1) 置信度门控：s_i ≥ τ 才是候选目标，其余量测保持 0（杂波）
+        cand_mask = scores[b] >= threshold                # [M] bool
+        cand_idx = cand_mask.nonzero(as_tuple=False).squeeze(-1)   # [k] 候选量测下标
+        if len(cand_idx) == 0:
+            continue                                      # 无候选 → 全杂波（labels 保持 0）
+
+        # 2) 中心欧氏距离做 1 对 1 匹配：valid_targets [n,2] × 候选 [k,2] → [k, n]
+        dist_matrix = torch.cdist(valid_targets, pred_boxes[b][cand_idx], p=2).T   # [k, n]
         row_idx, col_idx = linear_sum_assignment(dist_matrix.detach().cpu().numpy())
 
-        # row_idx=量测索引，col_idx=valid_targets 内的目标索引
+        # row_idx=候选内部索引，col_idx=valid_targets 内部索引
+        matched = [False] * len(cand_idx)
         for qi, ti in zip(row_idx, col_idx):
-            labels[b, qi] = slot_indices[ti].item() + 1   # 槽位 0..2 → 类 1..3
+            labels[b, cand_idx[qi]] = slot_indices[ti].item() + 1   # 槽位 0..2 → 类 1..3
+            matched[qi] = True
+
+        # 3) 候选但未匹配上的：赋距离最近真实目标对应的槽位类
+        for qi in range(len(cand_idx)):
+            if matched[qi]:
+                continue
+            d = torch.norm(pred_boxes[b][cand_idx[qi]] - valid_targets, dim=-1)  # [n]
+            ti = torch.argmin(d).item()
+            labels[b, cand_idx[qi]] = slot_indices[ti].item() + 1
 
     return labels
 
 
 # ---------------------------------------------------------------------------
-# 3) 关联损失（训练）
+# 3) 关联损失（训练）需要优化
 # ---------------------------------------------------------------------------
 def association_loss(S, labels, clutter_weight=1.0):
     """加权交叉熵损失（论文式）。

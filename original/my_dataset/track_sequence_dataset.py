@@ -162,3 +162,55 @@ def load_track_sequence_dataset(data_root_folder, window_size=20, stride=10,
     print(f'加载跟踪序列数据集 (滑窗 {window_size}/{stride})')
     print(f'数据目录: {data_root_folder}')
     return TrackSequenceDataset(data_root_folder, window_size, stride, add_noise, delete_occlusion)
+
+
+class TrackSequenceColdDataset(TrackSequenceDataset):
+    """冷启动跟踪序列数据集：M1 输出从缓存读，标签从原数据集读。
+
+    与 TrackSequenceDataset 的区别只在 __getitem__ 返回的内容：
+        - TrackSequenceDataset         : (signals[T,8,89,10], labels[T,3,2])
+        - TrackSequenceColdDataset     : (out[T,50,4], conf[T,50,2], feat[T,50,128], labels[T,3,2])
+    其中 out/conf/feat 是 save_m1_cache.py 预计算好的 M1 推理结果，直接读缓存即可，
+    训练时跳过 M1 前向（对应 train_tracker.py 的 IS_COLD 开关）。
+
+    滑窗/文件夹遍历逻辑完全复用父类（不再重写），仅覆盖 __getitem__。
+    注意：缓存里 M1 输出是在「无加噪」信号上算的，故冷启动路径不再做 add_noise 增强。
+    """
+
+    def __init__(self, data_root_folder, cache_root_folder, window_size=20, stride=10):
+        # 父类固定 add_noise=False（缓存是预计算好的，无法逐 epoch 重新加噪）
+        super().__init__(data_root_folder, window_size, stride,
+                         add_noise=False, delete_occlusion=False)
+        self.cache_root_folder = cache_root_folder
+
+    def __getitem__(self, idx):
+        """返回一个窗口：out[T,50,4], conf[T,50,2], feat[T,50,128], labels[T,3,2]。"""
+        folder_idx, start = self.windows[idx]
+        folder_name = self.folders[folder_idx]['folder']
+        frames = self.folders[folder_idx]['frames'][start: start + self.window_size]
+
+        outs, confs, feats, labels = [], [], [], []
+        for _signal_path, label_path, sample_id in frames:
+            # 缓存路径：<cache_root>/<folder>/m1_cache/<sample_id>.npz（save_m1_cache.py 的产物）
+            cache_path = os.path.join(self.cache_root_folder, folder_name,
+                                      'm1_cache', f'{sample_id}.npz')
+            d = np.load(cache_path)
+            outs.append(torch.from_numpy(d['out']))       # [50,4]  float32
+            confs.append(torch.from_numpy(d['conf']))     # [50,2]  float32
+            feats.append(torch.from_numpy(d['feat']))     # [50,128] float32
+            # 标签仍从原数据集读：对 10 个时间步平均 -> (3,2)
+            center = torch.from_numpy(np.load(label_path)).mean(0).reshape(-1, 2)
+            labels.append(center)
+
+        return (torch.stack(outs, dim=0), torch.stack(confs, dim=0),
+                torch.stack(feats, dim=0), torch.stack(labels, dim=0))
+        # [T,50,4], [T,50,2], [T,50,128], [T,3,2]
+
+
+def load_track_sequence_cold_dataset(data_root_folder, cache_root_folder,
+                                     window_size=20, stride=10):
+    """加载冷启动跟踪序列数据集（M1 输出走缓存，标签走原数据集）。"""
+    print(f'加载冷启动跟踪序列数据集 (滑窗 {window_size}/{stride})')
+    print(f'数据目录: {data_root_folder}')
+    print(f'缓存目录: {cache_root_folder}')
+    return TrackSequenceColdDataset(data_root_folder, cache_root_folder, window_size, stride)

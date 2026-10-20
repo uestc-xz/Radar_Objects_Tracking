@@ -41,7 +41,9 @@ class ScoreFusion(nn.Module):
             nn.Linear(64, 1),
         )
         # 虚拟杂波类的可学习 logit（所有量测共享，等价于全局「无目标」阈值）
-        self.clutter_logit = nn.Parameter(torch.zeros(1))
+        # 【初始化修复】初始为 0 时「杂波分=0 > 随机初始化的航迹分(全负)」，argmax 恒判杂波 →
+        # 全 0 分配且训练难以恢复。改成负值，让随机航迹分在起步时就能盖过杂波、产生非 0 分配。
+        self.clutter_logit = nn.Parameter(torch.tensor([-1.0]))
 
     def forward(self, g_geom, phi_f_i, phi_f_k):
         """前向：计算 (量测 i, 航迹 k) 的融合分 + 杂波分，拼成 [B,50,4]。
