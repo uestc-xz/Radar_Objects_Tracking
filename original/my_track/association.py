@@ -22,6 +22,8 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
+from original.my_track.config import CLUTTER_WEIGHT_STEP  # λ 随 epoch 步进的步进量
+
 
 # ---------------------------------------------------------------------------
 # 1) 关联决策（推理）
@@ -127,18 +129,20 @@ def build_assignment_targets(pred_boxes, targets, scores, threshold=0.96):
 # ---------------------------------------------------------------------------
 # 3) 关联损失（训练）需要优化
 # ---------------------------------------------------------------------------
-def association_loss(S, labels, clutter_weight=1.0):
+def association_loss(S, labels, clutter_weight=1.0, epoch=0):
     """加权交叉熵损失（论文式）。
 
     Args:
         S              : [B, 50, 4] 打分矩阵（第 0 列杂波，1..3 列航迹）
         labels         : [B, 50]    真值类标签 ∈ {0,1,2,3}
         clutter_weight : float      杂波类权重 λ（>1 增强杂波识别惩罚，见任务书 §3 M7）
+        epoch          : int        当前 epoch（1 起）；>0 时 λ 按 CLUTTER_WEIGHT_STEP 随 epoch 步进
 
     Returns:
         loss : 标量
     """
-    # 类权重：杂波类乘 λ，航迹类为 1
+    # 类权重：杂波类乘 λ；λ 随 epoch 步进（epoch=1 用基准 λ，之后每 epoch 增加 CLUTTER_WEIGHT_STEP）
+    clutter_weight = clutter_weight + max(0, epoch - 1) * CLUTTER_WEIGHT_STEP
     class_weights = torch.tensor([clutter_weight, 1.0, 1.0, 1.0],
                                  device=S.device, dtype=S.dtype)
     return F.cross_entropy(S.reshape(-1, 4), labels.reshape(-1), weight=class_weights)

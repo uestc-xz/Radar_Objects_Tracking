@@ -2,7 +2,7 @@ r"""
 跟踪关联网络前向函数 + 训练入口（自回归 + 冻结 M1）
 ==================================================
 本文件放：
-    - 前向逻辑  _forward_sequence / forward_batch / forward_batch_cold
+    - 前向逻辑  _forward_sequences / forward_batch / forward_batch_cold
     - 训练入口  main()（组装数据/模型/优化器后，调用 train.run_training 跑训练循环）
 
 训练方式（对应方案 A 冻结 M1 + 决策 D-ds2 自回归）：
@@ -55,64 +55,80 @@ from original.my_track.config import *                            # noqa: E402,F
 
 
 # ---------------------------------------------------------------------------
-# 单条序列的逐帧跟踪前向（训练/校验共用，逻辑与原单序列版完全一致）
+# 批量序列的逐帧跟踪前向（时间维自回归串行，batch 维 B 并行；训练/校验共用）
 # ---------------------------------------------------------------------------
-def _forward_sequence(coor_b, conf_b, feat_b, gt_b, bank, mapper, res_gru, scorer,
-                      clutter_weight=CLUTTER_WEIGHT, dt=DT, conf_threshold=CONF_THRESHOLD):
-    """对「一条序列」做逐帧 M2→M8 前向，返回 (损失和, 损失帧数, 分配统计)。
+def _forward_sequences(coor, conf, feat, gt, banks, mapper, res_gru, scorer,
+                       clutter_weight=CLUTTER_WEIGHT, dt=DT, conf_threshold=CONF_THRESHOLD, epoch=0):
+    """对 B 条序列做逐帧 M2→M8 前向，返回 (损失和, 损失帧数, 分配统计)。
+
+    与原单序列版逻辑完全一致，仅把「B 条序列各自 batch=1 前向」合并成
+    「每帧一次 batch=B 前向」：时间维 t 因自回归仍逐帧串行，batch 维 B
+    （序列间相互独立）拼进 M4/M5/M6 的 batch 维并行，把 B×(T-1) 次小 kernel
+    启动压缩为 (T-1) 次 batched 前向。
 
     Args:
-        coor_b  : [T, 50, 2]   该序列每帧量测中心（已由 M1 前向得到）
-        conf_b  : [T, 50, 2]   该序列每帧置信 logits
-        feat_b  : [T, 50, 128] 该序列每帧量测特征
-        gt_b    : [T, 3, 2]    真值中心（空槽 (0,0)）
-        bank    : TrackBank    该序列专属航迹库（M3+M8，无参数）
+        coor  : [B, T, 50, 2]   每条序列每帧量测中心（已由 M1 前向得到）
+        conf  : [B, T, 50, 2]   每条序列每帧置信 logits
+        feat  : [B, T, 50, 128] 每条序列每帧量测特征
+        gt    : [B, T, 3, 2]    真值中心（空槽 (0,0)）
+        banks : list[TrackBank] 长度 B，每条序列一个（M3+M8，无参数）
         mapper/res_gru/scorer : M4/M5/M6（可训练，跨序列共享）
 
     Returns:
-        total_loss : 标量张量（帧内损失累加，未除帧数；训练时带梯度）
-        n_frames   : int  参与损失的帧数（= T-1）
-        assign_hist: list[4] 类 0/1/2/3 的累计量测数（诊断用）
+        total_loss : 标量张量（各帧损失累加，未除帧数；训练时带梯度）
+        n_frames   : int  参与损失的帧数（= B*(T-1)）
+        assign_hist: list[4] 类 0/1/2/3 的累计量测数（合计 = B*(T-1)*50，首帧不计）
     """
-    T = coor_b.shape[0]
+    B, T = coor.shape[0], coor.shape[1]
     total_loss = 0.0
     n_frames = 0
     assign_hist = [0, 0, 0, 0]
 
     for t in range(T):
-        m_pos = coor_b[t]                           # [50,2] 本帧量测中心
-        m_score = F.softmax(conf_b[t], dim=-1)[..., 1]   # [50] 置信度 s_i
-        m_feat = feat_b[t]                          # [50,128] 量测特征 f_i
+        m_pos = coor[:, t]                              # [B,50,2] 本帧量测中心
+        m_score = F.softmax(conf[:, t], dim=-1)[..., 1] # [B,50] 置信度 s_i
+        m_feat = feat[:, t]                             # [B,50,128] 量测特征 f_i
 
         # 首帧只初始化航迹库，不参与损失（无历史可关联）
         if t == 0:
-            bank.init_from_measurements(m_pos, m_score, m_feat)
+            for b in range(B):
+                banks[b].init_from_measurements(m_pos[b], m_score[b], m_feat[b])
             continue
 
+        # 拼接 B 条序列的航迹侧状态，让 M4/M5/M6 一次 batched 前向（batch 维 = B）
+        bank_feat = torch.stack([banks[b].feat for b in range(B)], dim=0)  # [B,3,128]
+        bank_hist = torch.stack([banks[b].hist for b in range(B)], dim=0)  # [B,3,H,4]
+
         # M4 特征映射：量测侧 φ(f_i) 与航迹侧 φ(f_k) 共用同一映射
-        phi_i = mapper(m_feat.unsqueeze(0))         # [1,50,128]
-        phi_k = mapper(bank.feat.unsqueeze(0))      # [1,3,128]
+        phi_i = mapper(m_feat)                          # [B,50,128]
+        phi_k = mapper(bank_feat)                       # [B,3,128]
 
         # M5 几何残差 GRU：量测位置 × 航迹短历史 → 几何一致性特征
-        g_geom = res_gru(m_pos.unsqueeze(0), bank.hist.unsqueeze(0))   # [1,50,3,64]
+        g_geom = res_gru(m_pos, bank_hist)              # [B,50,3,64]
 
         # M6 融合打分：g_geom + 特征相似度 → 4 类打分（0 列杂波）
-        S = scorer(g_geom, phi_i, phi_k)            # [1,50,4]
+        S = scorer(g_geom, phi_i, phi_k)                # [B,50,4]
 
         # M7 监督 + 损失：置信度阈值先筛 + 匈牙利把 GT 槽位伪 ID 映射成量测类标签，加权 CE
-        labels = build_assignment_targets(m_pos.unsqueeze(0), gt_b[t].unsqueeze(0),
-                                          m_score.unsqueeze(0), threshold=conf_threshold)  # [1,50]
-        total_loss = total_loss + association_loss(S, labels, clutter_weight)
-        n_frames += 1
+        labels = build_assignment_targets(m_pos, gt[:, t], m_score,
+                                          threshold=conf_threshold)  # [B,50]
+        # 【口径】association_loss 的 CE 带 class_weights 时 mean 归约 = 除以「各元素
+        # 权值和」而非元素数；若对整批 [B,50] 做一次 mean，会按整批权值和归一化，与
+        # 原逐条版「每条先按自身权值和归一化再求和」量纲不同。故损失仍逐条算再求和
+        # （仅为 B 次极小的 CE kernel，并行收益来自 M4/M5/M6 的 batched 前向，无影响）。
+        for b in range(B):
+            total_loss = total_loss + association_loss(S[b:b + 1], labels[b:b + 1], clutter_weight, epoch=epoch)
+        n_frames += B
 
         # M8 自回归更新：用模型自己的决策（argmax + 1对1）更新航迹，detach 与推理一致
         with torch.no_grad():
-            assignments = associate(S)              # [1,50] ∈ {0,1,2,3}
-            bank.update(assignments[0], m_pos, m_feat, dt=dt)
+            assignments = associate(S)                  # [B,50] ∈ {0,1,2,3}
 
-        # 诊断：统计本帧分配分布
-        for c in range(4):
-            assign_hist[c] += (assignments[0] == c).sum().item()
+        # 逐条更新航迹状态（bank 是每条序列独立对象，非网络前向，开销可忽略）+ 诊断统计
+        for b in range(B):
+            banks[b].update(assignments[b], m_pos[b], m_feat[b], dt=dt)
+            for c in range(4):
+                assign_hist[c] += (assignments[b] == c).sum().item()
 
     return total_loss, n_frames, assign_hist
 
@@ -121,12 +137,12 @@ def _forward_sequence(coor_b, conf_b, feat_b, gt_b, bank, mapper, res_gru, score
 # 批处理前向：M1 批量化一次 + 逐条序列跟踪（训练/校验共用）
 # ---------------------------------------------------------------------------
 def forward_batch(signals, gt, model, banks, mapper, res_gru, scorer,
-                  clutter_weight=CLUTTER_WEIGHT, dt=DT, conf_threshold=CONF_THRESHOLD):
+                  clutter_weight=CLUTTER_WEIGHT, dt=DT, conf_threshold=CONF_THRESHOLD, epoch=0):
     """对 B 条序列做 M1→M8 前向，返回 (平均损失, 损失帧数, 分配统计)。
 
-    逻辑与单序列版完全一致，仅两处变化：
+    逻辑与原实现完全一致，仅两处变化：
         - M1 前端把 B 条序列的帧拼成 [B*T, 8, 89, 10] 一次前向（批量化提速）；
-        - 跟踪部分逐条序列独立跑，各用各的 TrackBank（多序列间无依赖，天然可并行）。
+        - 跟踪部分把 B 条序列拼进 batch 维，每帧一次 batched 前向（见 _forward_sequences）。
 
     Args:
         signals : [B, T, 8, 89, 10] complex64   B 条序列、各 T 帧信号
@@ -148,17 +164,9 @@ def forward_batch(signals, gt, model, banks, mapper, res_gru, scorer,
     conf = conf.reshape(B, T, 50, 2)                 # [B,T,50,2]
     feat = feat.reshape(B, T, 50, 128)               # [B,T,50,128]
 
-    total_loss = 0.0
-    n_frames = 0
-    assign_hist = [0, 0, 0, 0]
-    for b in range(B):
-        loss_b, n_b, ah_b = _forward_sequence(
-            coor[b], conf[b], feat[b], gt[b], banks[b], mapper, res_gru, scorer,
-            clutter_weight=clutter_weight, dt=dt, conf_threshold=conf_threshold)
-        total_loss = total_loss + loss_b
-        n_frames += n_b
-        for c in range(4):
-            assign_hist[c] += ah_b[c]
+    total_loss, n_frames, assign_hist = _forward_sequences(
+        coor, conf, feat, gt, banks, mapper, res_gru, scorer,
+        clutter_weight=clutter_weight, dt=dt, conf_threshold=conf_threshold, epoch=epoch)
 
     return total_loss / n_frames, n_frames, assign_hist
 
@@ -167,11 +175,11 @@ def forward_batch(signals, gt, model, banks, mapper, res_gru, scorer,
 # 批处理前向（冷启动）：直接用缓存 M1 输出，跳过 M1 前向（训练/校验共用）
 # ---------------------------------------------------------------------------
 def forward_batch_cold(out, conf, feat, gt, banks, mapper, res_gru, scorer,
-                       clutter_weight=CLUTTER_WEIGHT, dt=DT, conf_threshold=CONF_THRESHOLD):
+                       clutter_weight=CLUTTER_WEIGHT, dt=DT, conf_threshold=CONF_THRESHOLD, epoch=0):
     """冷启动：对 B 条序列的「缓存 M1 输出」做 M2→M8 前向，返回 (平均损失, 损失帧数, 分配统计)。
 
     与 forward_batch 的区别：省掉 M1 前向（out/conf/feat 已由缓存加载好），
-    跟踪部分逐条序列复用 _forward_sequence，逻辑完全一致。
+    跟踪部分复用 _forward_sequences（batch 维并行），逻辑完全一致。
 
     Args:
         out  : [B, T, 50, 4]   缓存 M1 最终输出（前 2 列 = 中心坐标，后 2 列冗余未用）
@@ -187,17 +195,10 @@ def forward_batch_cold(out, conf, feat, gt, banks, mapper, res_gru, scorer,
     """
     B, T = out.shape[0], out.shape[1]
     coor = out[..., :2]                               # [B,T,50,2] 中心坐标
-    total_loss = 0.0
-    n_frames = 0
-    assign_hist = [0, 0, 0, 0]
-    for b in range(B):
-        loss_b, n_b, ah_b = _forward_sequence(
-            coor[b], conf[b], feat[b], gt[b], banks[b], mapper, res_gru, scorer,
-            clutter_weight=clutter_weight, dt=dt, conf_threshold=conf_threshold)
-        total_loss = total_loss + loss_b
-        n_frames += n_b
-        for c in range(4):
-            assign_hist[c] += ah_b[c]
+
+    total_loss, n_frames, assign_hist = _forward_sequences(
+        coor, conf, feat, gt, banks, mapper, res_gru, scorer,
+        clutter_weight=clutter_weight, dt=dt, conf_threshold=conf_threshold, epoch=epoch)
 
     return total_loss / n_frames, n_frames, assign_hist
 
@@ -246,11 +247,11 @@ def main():
         train_ds = load_track_sequence_cold_dataset(
             TRAIN_ROOT, os.path.join(CACHE_ROOT, 'fast_dataset_multi_train'), WINDOW_SIZE, STRIDE)
         val_ds = load_track_sequence_cold_dataset(
-            VAL_ROOT, os.path.join(CACHE_ROOT, 'fast_dataset_multi_test'), WINDOW_SIZE, STRIDE)
+            VAL_ROOT, os.path.join(CACHE_ROOT, 'fast_dataset_multi_test'), WINDOW_SIZE, WINDOW_SIZE-1)
     else:
         train_ds = load_track_sequence_dataset(TRAIN_ROOT, WINDOW_SIZE, STRIDE, add_noise=ADD_NOISE)
-        val_ds = load_track_sequence_dataset(VAL_ROOT, WINDOW_SIZE, STRIDE, add_noise=False)
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=False,
+        val_ds = load_track_sequence_dataset(VAL_ROOT, WINDOW_SIZE, WINDOW_SIZE - 1, add_noise=False)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               drop_last=True, num_workers=8)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
                             drop_last=False, num_workers=8)

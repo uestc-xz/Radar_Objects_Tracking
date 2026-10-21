@@ -7,7 +7,7 @@ r"""
     - _plot_loss     训练/校验损失曲线 PNG
 
 文件分工：
-    超参在 config.py；前向函数（_forward_sequence / forward_batch / forward_batch_cold）
+    超参在 config.py；前向函数（_forward_sequences / forward_batch / forward_batch_cold）
     与训练入口 main() 在 train_tracker.py。本文件只被 train_tracker.main 调用，不含入口。
 """
 import os
@@ -26,7 +26,7 @@ from original.my_track.train_tracker import forward_batch, forward_batch_cold  #
 # ---------------------------------------------------------------------------
 # 校验（无梯度）
 # ---------------------------------------------------------------------------
-def evaluate(val_loader, model, mapper, res_gru, scorer, banks, is_cold=IS_COLD, max_win=MAX_VAL_WIN):
+def evaluate(val_loader, model, mapper, res_gru, scorer, banks, epoch=0, is_cold=IS_COLD, max_win=MAX_VAL_WIN):
     """校验：无梯度跑一遍 val_loader，返回平均损失。
 
     is_cold=True 时 model=None，val_loader 产出 4 元组 (out,conf,feat,gt)，走冷启动前向；
@@ -45,13 +45,13 @@ def evaluate(val_loader, model, mapper, res_gru, scorer, banks, is_cold=IS_COLD,
                 conf = conf.to(device)
                 feat = feat.to(device)
                 gt = gt.to(device)
-                loss, n, _ = forward_batch_cold(out, conf, feat, gt, banks, mapper, res_gru, scorer)
+                loss, n, _ = forward_batch_cold(out, conf, feat, gt, banks, mapper, res_gru, scorer, epoch=epoch)
                 seen += out.shape[0]
             else:
                 signals, gt = batch                       # [B,T,8,89,10]/[B,T,3,2]
                 signals = signals.to(device)
                 gt = gt.to(device)
-                loss, n, _ = forward_batch(signals, gt, model, banks, mapper, res_gru, scorer)
+                loss, n, _ = forward_batch(signals, gt, model, banks, mapper, res_gru, scorer, epoch=epoch)
                 seen += signals.shape[0]
             total += loss.item() * n
             cnt += n
@@ -122,13 +122,13 @@ def run_training(device, model, mapper, res_gru, scorer, optimizer,
                 feat = feat.to(device)
                 gt = gt.to(device)
                 loss, n, assign_hist = forward_batch_cold(
-                    out, conf, feat, gt, banks, mapper, res_gru, scorer)
+                    out, conf, feat, gt, banks, mapper, res_gru, scorer, epoch=epoch)
             else:
                 signals, gt = batch                  # [B,T,8,89,10]/[B,T,3,2]
                 signals = signals.to(device)
                 gt = gt.to(device)
                 loss, n, assign_hist = forward_batch(
-                    signals, gt, model, banks, mapper, res_gru, scorer)
+                    signals, gt, model, banks, mapper, res_gru, scorer, epoch=epoch)
             loss.backward()
             optimizer.step()
 
@@ -162,7 +162,7 @@ def run_training(device, model, mapper, res_gru, scorer, optimizer,
         print()
 
         # ---- 每 epoch 校验 ----
-        val_loss = evaluate(val_loader, model, mapper, res_gru, scorer, banks)
+        val_loss = evaluate(val_loader, model, mapper, res_gru, scorer, banks, epoch=epoch)
         val_hist.append((global_step, val_loss))
         print(f'=== epoch {epoch}/{EPOCHS} 结束: val_loss={val_loss:.4f}  '
               f'best={best_val:.4f} ===', flush=True)

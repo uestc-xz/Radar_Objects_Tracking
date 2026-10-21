@@ -21,9 +21,9 @@ OUT_DIR      = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'runs')
 IS_COLD     = True
 CACHE_ROOT  = r'E:\Jupyter\NewMOTR数据集'   # M1 缓存根目录；其下与原始同名 fast_dataset_multi_train/_test
 
-WINDOW_SIZE  = 20      # 短序列长度（帧）
-STRIDE       = 10      # 滑窗步长（overlap = 20 - 10 = 10）
-HIST_LEN     = 6       # 短历史长度 H
+WINDOW_SIZE  = 50      # 短序列长度（帧）
+STRIDE       = 25      # 滑窗步长（overlap = 20 - 10 = 10）
+HIST_LEN     = 20       # 短历史长度 H
 NUM_TRACKS   = 3       # 航迹槽位数 N（= 最多人数）
 FEAT_DIM     = 128     # dec_output 特征维度
 BATCH_SIZE   = 32      # 每步并行的序列数（batch）；越大 GPU 占用越高，按显存调
@@ -31,7 +31,8 @@ BATCH_SIZE   = 32      # 每步并行的序列数（batch）；越大 GPU 占用
 EPOCHS         = 50
 LR             = 1e-3
 CLUTTER_WEIGHT = 0.01   # 杂波类 CE 权重 λ（<1 = 压背景权重，让前景/航迹项主导损失；别设 0，否则不学拒绝杂波）
-DT             = 0.25  # 帧间隔（秒）
+CLUTTER_WEIGHT_STEP = 0.03   # λ 每 epoch 的步进量：λ(epoch)=CLUTTER_WEIGHT+(epoch-1)*STEP；正=递增、负=递减、0=关闭
+DT             = 0.24  # 帧间隔（秒）
 CONF_THRESHOLD = 0.96  # 量测置信度阈值 τ：s_i≥τ 才作为候选目标参与匹配（前端定位标定值）
 ADD_NOISE      = True
 MAX_VAL_WIN    = None  # 每 epoch 校验窗口数上限；None=全量（慢时可设 200）
