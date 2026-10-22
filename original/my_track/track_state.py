@@ -1,158 +1,150 @@
+"""固定槽位航迹状态库。
+
+每个序列拥有独立 TrackBank。`initialized` 表示槽位已有状态，`confirmed` 表示 ID 已稳定，
+`observed` 是本帧量测标记。漏检只更新预测历史和置信度，不会删除或复用已确认身份。
+所有坐标/速度为米和米/秒；本对象不参与 autograd。
 """
-M3 航迹状态库 (Track State Bank)
-================================
-作用：
-    维护固定 3 条航迹（对应最多 3 个目标）的状态，为 M5 的残差 GRU 提供每条航迹
-    的短历史 (x,y,vx,vy) 序列，为 M6 提供航迹特征 f_k。
+import math
 
-约定（见 doc/跟踪任务书.md §3 M3）：
-    - 槽位数 N=3，与 GT 的 3 槽 (x,y)、空槽 (0,0) 对齐。
-    - 每条航迹字段：位置 (x,y)、速度 (vx,vy)、特征 f_k、短历史 hist_k [H,4]、
-      年龄 age、连续未匹配帧数 miss、存活标志 alive。
-    - 每条序列人数固定 → 航迹主要在序列首帧初始化，帧内只做匹配 + coast。
-    - 本阶段只实现【状态存储 + 首帧初始化】；匹配后的更新逻辑在 M8 实现。
-
-输入（首帧量测，用于初始化航迹）：
-    meas_pos   : [M, 2]   量测中心坐标（M=50）
-    meas_score : [M]      量测置信度
-    meas_feat  : [M, 128] 量测特征
-
-输出（供 M5/M6 使用）：
-    hist : [3, H, 4]   3 条航迹的短历史 (x,y,vx,vy)
-    feat : [3, 128]    3 条航迹的特征 f_k
-"""
 import torch
+
+from original.my_track.config import (
+    CONFIRM_THRESHOLD,
+    FEAT_DIM,
+    HIST_LEN,
+    MISS_CONFIDENCE_DECAY,
+    NUM_TRACKS,
+)
 
 
 class TrackBank:
-    """固定 3 槽的航迹状态库。所有字段用张量批量存储，跟踪按 batch=1 逐帧进行。"""
+    """保存单条记录的三槽状态及滚动确认统计。"""
 
-    def __init__(self, num_tracks=3, hist_len=4, feat_dim=128):
-        self.num_tracks = num_tracks   # 航迹槽位数（= 最多人数）
-        self.hist_len = hist_len       # 短历史长度 H
-        self.feat_dim = feat_dim       # 特征维度（= dec_output 维度 128）
+    def __init__(self, num_tracks=NUM_TRACKS, hist_len=HIST_LEN, feat_dim=FEAT_DIM,
+                 confirm_threshold=CONFIRM_THRESHOLD, miss_decay=MISS_CONFIDENCE_DECAY):
+        if num_tracks != 3:
+            raise ValueError("the current GT contract requires exactly 3 track slots")
+        if hist_len < 1:
+            raise ValueError("hist_len must be positive")
+        if not math.isfinite(float(confirm_threshold)) or not 0 <= confirm_threshold <= 1:
+            raise ValueError("confirm_threshold must be in [0,1]")
+        if not math.isfinite(float(miss_decay)) or not 0 <= miss_decay <= 1:
+            raise ValueError("miss_decay must be in [0,1]")
+        self.num_tracks = num_tracks
+        self.hist_len = hist_len
+        self.feat_dim = feat_dim
+        self.confirm_threshold = float(confirm_threshold)
+        self.miss_decay = float(miss_decay)
         self.reset()
 
-    def reset(self):
-        """清空为未初始化状态（CPU 全零占位；init_from_measurements 会在量测设备上重建）。"""
-        self.pos = torch.zeros(self.num_tracks, 2)                 # [3,2] 位置 (x,y)
-        self.vel = torch.zeros(self.num_tracks, 2)                 # [3,2] 速度 (vx,vy)
-        self.feat = torch.zeros(self.num_tracks, self.feat_dim)    # [3,128] 特征 f_k
-        self.hist = torch.zeros(self.num_tracks, self.hist_len, 4) # [3,H,4] 短历史
-        self.age = torch.zeros(self.num_tracks, dtype=torch.long)  # [3] 年龄
-        self.miss = torch.zeros(self.num_tracks, dtype=torch.long) # [3] 连续未匹配帧数
-        self.alive = torch.zeros(self.num_tracks, dtype=torch.bool)# [3] 存活标志
-
-    def init_from_measurements(self, meas_pos, meas_score, meas_feat):
-        """序列首帧初始化：取置信度最高的 num_tracks 个量测作为航迹起点。
-
-        首帧无速度先验 → 速度置 0；短历史用 (x,y,0,0) 复制 hist_len 次填充。
-        更细的出生/门控判定（用 s_i 阈值判 alive）留到 M7/M8 再实现。
-        """
-        device = meas_pos.device
-        dtype = meas_pos.dtype
-        topk = min(self.num_tracks, meas_pos.shape[0])
-
-        # 按置信度取前 topk 个量测的索引
-        _, idx = torch.topk(meas_score, k=topk)         # [topk]
-        init_pos = meas_pos[idx]                        # [topk,2]
-        init_vel = torch.zeros_like(init_pos)           # [topk,2] 首帧速度 0
-        init_feat = meas_feat[idx]                      # [topk,128]
-
-        # 在量测所在设备/精度上初始化所有字段；未占满的槽位保持全零（空槽，alive=False）
-        self.pos = torch.zeros(self.num_tracks, 2, device=device, dtype=dtype)
-        self.vel = torch.zeros(self.num_tracks, 2, device=device, dtype=dtype)
-        self.feat = torch.zeros(self.num_tracks, self.feat_dim, device=device, dtype=dtype)
+    def reset(self, device=None, dtype=torch.float32):
+        """清空序列状态；新记录必须显式 reset，序列内不重置已确认槽。"""
+        device = torch.device(device) if device is not None else torch.device("cpu")
         self.hist = torch.zeros(self.num_tracks, self.hist_len, 4, device=device, dtype=dtype)
-        self.age = torch.zeros(self.num_tracks, dtype=torch.long, device=device)
-        self.miss = torch.zeros(self.num_tracks, dtype=torch.long, device=device)
-        self.alive = torch.zeros(self.num_tracks, dtype=torch.bool, device=device)
+        self.feat = torch.zeros(self.num_tracks, self.feat_dim, device=device, dtype=dtype)
+        self.confidence = torch.zeros(self.num_tracks, device=device, dtype=dtype)
+        self.existence_history = torch.zeros(self.num_tracks, self.hist_len, device=device, dtype=dtype)
+        self.initialized = torch.zeros(self.num_tracks, device=device, dtype=torch.bool)
+        self.confirmed = torch.zeros(self.num_tracks, device=device, dtype=torch.bool)
+        self.miss = torch.zeros(self.num_tracks, device=device, dtype=torch.long)
+        self.age = torch.zeros(self.num_tracks, device=device, dtype=torch.long)
+        self.frames_seen = 0
 
-        self.pos[:topk] = init_pos
-        self.vel[:topk] = init_vel
-        self.feat[:topk] = init_feat
-        self.alive[:topk] = True
-        self.age[:topk] = 1
-        self.miss[:topk] = 0
+    def as_tensors(self, device=None):
+        """返回 `JointTracker` 所需批字段前的无梯度状态张量。"""
+        return {
+            "hist": self.hist.to(device=device),
+            "feat": self.feat.to(device=device),
+            "confidence": self.confidence.to(device=device),
+            "confirmed": self.confirmed.to(device=device),
+            "initialized": self.initialized.to(device=device),
+            "miss": self.miss.to(device=device),
+            "age": self.age.to(device=device),
+        }
 
-        # 短历史 [topk,H,4]：每个历史步都填 (x,y,0,0)
-        init_state = torch.cat([init_pos, init_vel], dim=-1)            # [topk,4]
-        self.hist[:topk] = init_state.unsqueeze(1).repeat(1, self.hist_len, 1)
+    def update(self, final_pos, fused_feat, observed, existence_prob,
+               track_confidence, dt=0.24):
+        """按帧提交模型输出并推进状态。
 
-    def update(self, assignments, meas_pos, meas_feat, dt=0.24,
-               pos_alpha=0.5, vel_alpha=0.5, feat_alpha=0.5):
-        """M8 航迹更新：根据本帧关联结果 + 量测，更新 3 条航迹状态。
-
-        更新规则（doc/跟踪任务书.md §3 M8，batch=1 逐帧调用）：
-            匹配航迹 k（存在量测 i 使 assignments[i] == k+1）：
-                速度  v_k ← (1-α_v) v_k + α_v (p_i - x_k)/dt     # 瞬时速度 EMA
-                位置  x_k ← (1-α_p) x_k + α_p p_i                # 位置 EMA
-                特征  f_k ← (1-α_f) f_k + α_f f_i                # 原始特征 EMA
-                miss_k ← 0
-            未匹配航迹 k（coast）：
-                位置外推  x_k ← x_k + v_k * dt                   # 匀速外推
-                速度/特征 不变，miss_k ← miss_k + 1
-            两分支末尾都把 (x_k,y_k,vx_k,vy_k) 追加进 hist_k，截断保留最近 H 帧。
-
-        Args:
-            assignments : [M]       M7 关联结果，每量测归属 ∈ {0,1,2,3}
-            meas_pos    : [M, 2]    量测中心坐标 (x, y)
-            meas_feat   : [M, 128]  量测原始特征（dec_output）
-            dt          : float     帧间隔，默认 0.24s
-            pos_alpha / vel_alpha / feat_alpha : EMA 系数 ∈ (0,1]，越大越信当前量测
-
-        说明：
-            - 特征存「原始 dec_output」并做 EMA；φ 映射在 M6 打分时统一套用
-              （见 feature_map.py 约定），故 M3/M8 不耦合 M4 参数。
-            - 出生/死亡（alive 门控）留待完整跟踪流程（任务书 §3 M3/M7 第 6 步）。
-            - 【重要】先 clone、在副本上更新、最后整体赋值替换，避免就地修改被计算图
-              引用的旧张量：训练时 bank.feat/hist 会作为 mapper/GRU 的输入进入计算图，
-              就地改会触发 autograd 的 inplace 版本冲突。航迹状态本就不参与反向传播
-              （来自冻结 M1 + argmax 决策），clone 开销可忽略。
+        `final_pos[3,2]` 在观测/预测两种情况下都写入历史；特征只在 observed 时更新。
+        首次观测将速度设为零，后续速度用位置差分 EMA；confirmed 只允许 false->true。
         """
-        # 在副本上更新（不就地改 self.*，防止与计算图引用的旧张量冲突）
-        pos = self.pos.clone()
-        vel = self.vel.clone()
-        feat = self.feat.clone()
-        hist = self.hist.clone()
-        miss = self.miss.clone()
+        expected = {
+            "final_pos": (self.num_tracks, 2),
+            "fused_feat": (self.num_tracks, self.feat_dim),
+            "observed": (self.num_tracks,),
+            "existence_prob": (self.num_tracks,),
+            "track_confidence": (self.num_tracks,),
+        }
+        values = {
+            "final_pos": final_pos,
+            "fused_feat": fused_feat,
+            "observed": observed,
+            "existence_prob": existence_prob,
+            "track_confidence": track_confidence,
+        }
+        for name, shape in expected.items():
+            if tuple(values[name].shape) != shape:
+                raise ValueError(f"{name} must have shape {shape}")
+        if not math.isfinite(float(dt)) or dt <= 0:
+            raise ValueError("dt must be finite and positive")
 
-        for k in range(self.num_tracks):
-            # 归属航迹 k 的量测索引（M7 已做 1 对 1，至多 1 个）
-            idxs = (assignments == (k + 1)).nonzero(as_tuple=False).squeeze(-1)
+        device, dtype = self.hist.device, self.hist.dtype
+        final_pos = final_pos.detach().to(device=device, dtype=dtype)
+        fused_feat = fused_feat.detach().to(device=device, dtype=dtype)
+        observed = observed.detach().to(device=device, dtype=torch.bool)
+        existence_prob = existence_prob.detach().to(device=device, dtype=dtype)
+        track_confidence = track_confidence.detach().to(device=device, dtype=dtype)
+        for name, tensor in (("final_pos", final_pos), ("fused_feat", fused_feat),
+                             ("existence_prob", existence_prob), ("track_confidence", track_confidence)):
+            if not torch.isfinite(tensor).all():
+                raise ValueError(f"{name} contains NaN or Inf")
+        if ((existence_prob < 0) | (existence_prob > 1)).any():
+            raise ValueError("existence_prob must be in [0,1]")
+        if ((track_confidence < 0) | (track_confidence > 1)).any():
+            raise ValueError("track_confidence must be in [0,1]")
 
-            if idxs.numel() > 0:
-                i = idxs[0].item()                 # 匹配量测下标
-                pi = meas_pos[i]                   # [2] 量测位置
-                fi = meas_feat[i]                  # [128] 量测原始特征
+        was_initialized = self.initialized
+        initialized = was_initialized | observed
+        previous_pos = self.hist[:, -1, :2]
+        previous_vel = self.hist[:, -1, 2:]
+        measured_velocity = (final_pos - previous_pos) / float(dt)
+        velocity = torch.where(
+            (was_initialized & observed).unsqueeze(-1),
+            0.5 * previous_vel + 0.5 * measured_velocity,
+            previous_vel,
+        )
+        velocity = torch.where((~was_initialized & observed).unsqueeze(-1), torch.zeros_like(velocity), velocity)
+        state = torch.cat((final_pos, velocity), dim=-1)
+        self.hist = torch.cat((self.hist[:, 1:], state.unsqueeze(1)), dim=1)
 
-                # 速度：由 (量测 - 当前位置)/dt 求瞬时速度，再 EMA 平滑
-                vel_inst = (pi - pos[k]) / dt      # [2]
-                vel[k] = (1 - vel_alpha) * vel[k] + vel_alpha * vel_inst
+        update_feat = torch.where(
+            (was_initialized & observed).unsqueeze(-1),
+            0.5 * self.feat + 0.5 * fused_feat,
+            fused_feat,
+        )
+        self.feat = torch.where(observed.unsqueeze(-1), update_feat, self.feat)
+        decayed_confidence = self.confidence * self.miss_decay
+        self.confidence = torch.where(observed, track_confidence, decayed_confidence)
+        self.miss = torch.where(observed, torch.zeros_like(self.miss), self.miss + initialized.long())
+        self.initialized = initialized
+        self.age = torch.where(initialized, self.age + 1, torch.zeros_like(self.age))
 
-                # 位置：EMA
-                pos[k] = (1 - pos_alpha) * pos[k] + pos_alpha * pi
+        self.existence_history = torch.cat(
+            (self.existence_history[:, 1:], existence_prob.unsqueeze(-1)), dim=-1
+        )
+        enough_history = self.age >= self.hist_len
+        meets_presence = self.existence_history.mean(dim=-1) >= self.confirm_threshold
+        self.confirmed = self.confirmed | (initialized & enough_history & meets_presence)
+        self.frames_seen += 1
 
-                # 特征：原始特征 EMA
-                feat[k] = (1 - feat_alpha) * feat[k] + feat_alpha * fi
 
-                miss[k] = 0
-            else:
-                # coast：匀速外推，速度/特征不变
-                pos[k] = pos[k] + vel[k] * dt
-                miss[k] = miss[k] + 1
-
-            # 无论匹配与否，都把当前状态追加进短历史，保证 hist 始终是最近 H 帧
-            state = torch.cat([pos[k], vel[k]])            # [4]
-            hist[k] = torch.cat([hist[k][1:], state.unsqueeze(0)], dim=0)
-
-        # 存活航迹年龄 +1（alive 门控留待完整流程）
-        age = self.age + self.alive.long()
-
-        # 整体赋值替换旧张量（不就地修改）
-        self.pos = pos
-        self.vel = vel
-        self.feat = feat
-        self.hist = hist
-        self.miss = miss
-        self.age = age
+def batch_track_states(banks, device=None):
+    """沿 batch 维堆叠同一时刻的多个独立 TrackBank。"""
+    if not banks:
+        raise ValueError("at least one TrackBank is required")
+    states = [bank.as_tensors(device=device) for bank in banks]
+    keys = states[0].keys()
+    if any(state.keys() != keys for state in states[1:]):
+        raise ValueError("all TrackBank instances must expose identical state fields")
+    return {key: torch.stack([state[key] for state in states], dim=0) for key in keys}

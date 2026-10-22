@@ -33,19 +33,22 @@ class TrackSequenceDataset(Dataset):
     """滑窗式跟踪序列数据集（窗口内有序，窗口间可 shuffle）。"""
 
     def __init__(self, data_root_folder, window_size=20, stride=10,
-                 add_noise=True, delete_occlusion=False):
+                 add_noise=True, delete_occlusion=False, full_sequence=False):
         self.data_root_folder = data_root_folder
         self.window_size = window_size
         self.stride = stride
         self.add_noise = add_noise
         self.delete_occlusion = delete_occlusion
+        self.full_sequence = full_sequence
 
         # 每个文件夹 → 有序帧列表 [(signal_path, label_path, sample_id), ...]
         self.folders = self._build_folder_frame_lists()
         # 滑窗切分 → [(folder_idx, start_frame_idx), ...]
         self.windows = self._build_windows()
 
-        print(f"跟踪序列数据集加载完成：{len(self.folders)} 个文件夹，{len(self.windows)} 个窗口")
+        count = len(self.folders) if self.full_sequence else len(self.windows)
+        unit = "完整序列" if self.full_sequence else "窗口"
+        print(f"跟踪序列数据集加载完成：{len(self.folders)} 个文件夹，{count} 个{unit}")
         print(f"  窗口长度={self.window_size}，步长={self.stride}"
               f"（overlap={self.window_size - self.stride}）")
         print(f"  数据根目录: {data_root_folder}")
@@ -88,7 +91,8 @@ class TrackSequenceDataset(Dataset):
             if self.delete_occlusion:
                 frames = self._drop_occluded_frames(file_folder, frames)
 
-            if len(frames) >= self.window_size:
+            minimum_frames = 1 if self.full_sequence else self.window_size
+            if len(frames) >= minimum_frames:
                 folders.append({'folder': file_folder, 'frames': frames})
             else:
                 print(f"跳过 {file_folder}：帧数 {len(frames)} < 窗口长度 {self.window_size}")
@@ -133,10 +137,15 @@ class TrackSequenceDataset(Dataset):
         return signal + torch.complex(real_noise, imag_noise)
 
     def __len__(self):
-        return len(self.windows)
+        return len(self.folders) if self.full_sequence else len(self.windows)
 
     def __getitem__(self, idx):
         """返回一个窗口：signals [T,8,89,10] complex64, labels [T,3,2] float32。"""
+        if self.full_sequence:
+            return {
+                "folder": self.folders[idx]["folder"],
+                "frames": list(self.folders[idx]["frames"]),
+            }
         folder_idx, start = self.windows[idx]
         frames = self.folders[folder_idx]['frames'][start: start + self.window_size]
 
@@ -157,11 +166,12 @@ class TrackSequenceDataset(Dataset):
 
 
 def load_track_sequence_dataset(data_root_folder, window_size=20, stride=10,
-                                add_noise=True, delete_occlusion=False):
+                                add_noise=True, delete_occlusion=False, full_sequence=False):
     """加载跟踪序列数据集（接口与 load_fast_dataset1 保持一致）。"""
     print(f'加载跟踪序列数据集 (滑窗 {window_size}/{stride})')
     print(f'数据目录: {data_root_folder}')
-    return TrackSequenceDataset(data_root_folder, window_size, stride, add_noise, delete_occlusion)
+    return TrackSequenceDataset(data_root_folder, window_size, stride, add_noise,
+                                delete_occlusion, full_sequence)
 
 
 class TrackSequenceColdDataset(TrackSequenceDataset):
@@ -177,14 +187,24 @@ class TrackSequenceColdDataset(TrackSequenceDataset):
     注意：缓存里 M1 输出是在「无加噪」信号上算的，故冷启动路径不再做 add_noise 增强。
     """
 
-    def __init__(self, data_root_folder, cache_root_folder, window_size=20, stride=10):
+    def __init__(self, data_root_folder, cache_root_folder, window_size=20, stride=10,
+                 full_sequence=False):
         # 父类固定 add_noise=False（缓存是预计算好的，无法逐 epoch 重新加噪）
         super().__init__(data_root_folder, window_size, stride,
-                         add_noise=False, delete_occlusion=False)
+                         add_noise=False, delete_occlusion=False, full_sequence=full_sequence)
         self.cache_root_folder = cache_root_folder
 
     def __getitem__(self, idx):
         """返回一个窗口：out[T,50,4], conf[T,50,2], feat[T,50,128], labels[T,3,2]。"""
+        if self.full_sequence:
+            folder = self.folders[idx]
+            frames = []
+            for _signal_path, label_path, sample_id in folder["frames"]:
+                cache_path = os.path.join(
+                    self.cache_root_folder, folder["folder"], "m1_cache", f"{sample_id}.npz"
+                )
+                frames.append((cache_path, label_path, sample_id))
+            return {"folder": folder["folder"], "frames": frames}
         folder_idx, start = self.windows[idx]
         folder_name = self.folders[folder_idx]['folder']
         frames = self.folders[folder_idx]['frames'][start: start + self.window_size]
@@ -208,9 +228,10 @@ class TrackSequenceColdDataset(TrackSequenceDataset):
 
 
 def load_track_sequence_cold_dataset(data_root_folder, cache_root_folder,
-                                     window_size=20, stride=10):
+                                     window_size=20, stride=10, full_sequence=False):
     """加载冷启动跟踪序列数据集（M1 输出走缓存，标签走原数据集）。"""
     print(f'加载冷启动跟踪序列数据集 (滑窗 {window_size}/{stride})')
     print(f'数据目录: {data_root_folder}')
     print(f'缓存目录: {cache_root_folder}')
-    return TrackSequenceColdDataset(data_root_folder, cache_root_folder, window_size, stride)
+    return TrackSequenceColdDataset(data_root_folder, cache_root_folder, window_size,
+                                    stride, full_sequence=full_sequence)

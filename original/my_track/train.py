@@ -1,189 +1,245 @@
-r"""
-跟踪关联网络训练函数（训练循环 / 校验 / 绘图）
-================================================
-本文件放「训练相关函数」：
-    - run_training   训练主循环：跑 EPOCHS 个 epoch，含校验/日志/checkpoint，返回最优 val_loss
-    - evaluate       无梯度校验一遍 val_loader，返回平均损失
-    - _plot_loss     训练/校验损失曲线 PNG
+"""联合航迹网络训练循环与整记录验证。
 
-文件分工：
-    超参在 config.py；前向函数（_forward_sequences / forward_batch / forward_batch_cold）
-    与训练入口 main() 在 train_tracker.py。本文件只被 train_tracker.main 调用，不含入口。
+训练仅优化 JointTracker 并在窗口边界清空状态；验证按文件夹完整回放、仅在记录边界
+重置状态。新 checkpoint 与日志使用专属文件名，不覆盖旧实验产物。
 """
+import csv
 import os
 import time
 
+import numpy as np
 import torch
+from tqdm.auto import tqdm
 
-import matplotlib
-matplotlib.use('Agg')  # 无界面后端，只 savefig 不弹窗，方便实时刷新
-import matplotlib.pyplot as plt
+from original.my_track import config
+from original.my_track.metrics import sequence_tracking_metrics
+from original.my_track.train_tracker import (
+    forward_batch,
+    forward_batch_cold,
+    run_frozen_m1,
+)
 
-from original.my_track.config import *                            # noqa: E402,F401,F403
-from original.my_track.train_tracker import forward_batch, forward_batch_cold  # noqa: E402
+
+def _to_device(batch, device):
+    return tuple(value.to(device) if torch.is_tensor(value) else value for value in batch)
 
 
-# ---------------------------------------------------------------------------
-# 校验（无梯度）
-# ---------------------------------------------------------------------------
-def evaluate(val_loader, model, mapper, res_gru, scorer, banks, epoch=0, is_cold=IS_COLD, max_win=MAX_VAL_WIN):
-    """校验：无梯度跑一遍 val_loader，返回平均损失。
+@torch.no_grad()
+def evaluate_full_sequence_dataset(dataset, model, tracker, banks, device,
+                                   is_cold=config.IS_COLD, max_sequences=None,
+                                   show_progress=False, progress_desc="Validation"):
+    """逐条完整回放验证集；只在记录边界 reset，逐帧读取信号或 M1 缓存。"""
+    tracker.eval()
+    loss_total = 0.0
+    frame_count = 0
+    parts = {name: 0.0 for name in config.TRACKER_LOSS_WEIGHTS}
+    idsw_total = 0
+    active_total = 0
+    observed_total = 0
+    predicted_total = 0
+    miss_frames_total = 0
+    retained_misses_total = 0.0
+    abs_error_total = 0.0
+    squared_error_total = 0.0
+    known_targets_total = 0
+    covered_targets_total = 0
+    valid_target_frames_total = 0
+    tracked_target_frames_total = 0
+    untracked_target_frames_total = 0
+    sequence_count = min(len(dataset), max_sequences) if max_sequences is not None else len(dataset)
 
-    is_cold=True 时 model=None，val_loader 产出 4 元组 (out,conf,feat,gt)，走冷启动前向；
-    否则产出 2 元组 (signals,gt)，走 M1 前向。
-    """
-    mapper.eval(); res_gru.eval(); scorer.eval()
-    device = next(mapper.parameters()).device    # 从跟踪模块推断设备（冷启动时 model=None，不能取 model 参数）
-    total, cnt, seen = 0.0, 0, 0
-    with torch.no_grad():
-        for batch in val_loader:
-            if max_win is not None and seen >= max_win:   # max_win 按「窗口数」计
-                break
+    sequence_progress = tqdm(
+        range(sequence_count),
+        desc=progress_desc,
+        unit="seq",
+        dynamic_ncols=True,
+        leave=False,
+        disable=not show_progress,
+    )
+    for sequence_idx in sequence_progress:
+        record = dataset[sequence_idx]
+        bank = banks[0]
+        bank.reset(device=device, dtype=torch.float32)
+        positions, active, observed, labels = [], [], [], []
+        for frame in record["frames"]:
             if is_cold:
-                out, conf, feat, gt = batch              # [B,T,50,4]/[B,T,50,2]/[B,T,50,128]/[B,T,3,2]
-                out = out.to(device)
-                conf = conf.to(device)
-                feat = feat.to(device)
-                gt = gt.to(device)
-                loss, n, _ = forward_batch_cold(out, conf, feat, gt, banks, mapper, res_gru, scorer, epoch=epoch)
-                seen += out.shape[0]
+                cache_path, label_path, _sample_id = frame
+                with np.load(cache_path) as cached:
+                    out = torch.from_numpy(cached["out"]).to(device).view(1, 1, 50, 4)
+                    conf = torch.from_numpy(cached["conf"]).to(device).view(1, 1, 50, 2)
+                    feat = torch.from_numpy(cached["feat"]).to(device).view(1, 1, 50, config.FEAT_DIM)
+                label_array = np.load(label_path)
+                gt = torch.from_numpy(label_array).mean(dim=0).reshape(1, 1, 3, 2).to(device)
+                loss, n_frames, _, trajectory, batch_parts = forward_batch_cold(
+                    out, conf, feat, gt, [bank], tracker,
+                    return_details=True, reset_state=False,
+                )
             else:
-                signals, gt = batch                       # [B,T,8,89,10]/[B,T,3,2]
-                signals = signals.to(device)
-                gt = gt.to(device)
-                loss, n, _ = forward_batch(signals, gt, model, banks, mapper, res_gru, scorer, epoch=epoch)
-                seen += signals.shape[0]
-            total += loss.item() * n
-            cnt += n
-    mapper.train(); res_gru.train(); scorer.train()
-    return total / cnt if cnt else 0.0
+                signal_path, label_path, _sample_id = frame
+                signal = torch.from_numpy(np.load(signal_path)).unsqueeze(0).to(device)
+                out, conf, feat = run_frozen_m1(signal, model)
+                label_array = np.load(label_path)
+                gt = torch.from_numpy(label_array).mean(dim=0).reshape(1, 1, 3, 2).to(device)
+                loss, n_frames, _, trajectory, batch_parts = forward_batch_cold(
+                    out.view(1, 1, 50, 4),
+                    conf.view(1, 1, 50, 2),
+                    feat.view(1, 1, 50, config.FEAT_DIM),
+                    gt, [bank], tracker,
+                    return_details=True, reset_state=False,
+                )
+            loss_total += float(loss.item()) * n_frames
+            frame_count += n_frames
+            for name, value in batch_parts.items():
+                parts[name] += float(value.item()) * n_frames
+            positions.append(trajectory["final_pos"][0, 0].cpu())
+            active.append(trajectory["active"][0, 0].cpu())
+            observed.append(trajectory["observed"][0, 0].cpu())
+            labels.append(gt[0, 0].cpu())
+
+        if not positions:
+            continue
+        sequence_metrics = sequence_tracking_metrics(
+            torch.stack(positions), torch.stack(active), torch.stack(observed),
+            torch.stack(labels), warmup=config.HIST_LEN,
+        )
+        idsw_total += sequence_metrics["idsw"]
+        active_total += sequence_metrics["active_count"]
+        known_targets_total += sequence_metrics["known_target_count"]
+        covered_targets_total += sequence_metrics["covered_target_count"]
+        valid_target_frames_total += sequence_metrics["valid_target_frames"]
+        tracked_target_frames_total += sequence_metrics["tracked_target_frames"]
+        untracked_target_frames_total += sequence_metrics["untracked_target_frames"]
+        observed_total += sequence_metrics["observed_count"]
+        predicted_total += sequence_metrics["predicted_count"]
+        miss_frames_total += sequence_metrics["miss_frames"]
+        retained_misses_total += sequence_metrics["miss_retention"] * sequence_metrics["miss_frames"]
+        abs_error_total += sequence_metrics["mae_m"] * sequence_metrics["active_count"]
+        squared_error_total += sequence_metrics["rmse_m"] ** 2 * sequence_metrics["active_count"]
+        sequence_progress.set_postfix(
+            loss=f"{loss_total / max(frame_count, 1):.5f}",
+            frames=frame_count,
+        )
+
+    result = {name: value / max(frame_count, 1) for name, value in parts.items()}
+    result["loss"] = loss_total / max(frame_count, 1)
+    result["idsw"] = idsw_total
+    result["mae_m"] = abs_error_total / max(active_total, 1)
+    result["rmse_m"] = (squared_error_total / max(active_total, 1)) ** 0.5
+    result["miss_retention"] = retained_misses_total / max(miss_frames_total, 1)
+    result["observed_count"] = observed_total
+    result["predicted_count"] = predicted_total
+    result["active_count"] = active_total
+    result["target_coverage"] = covered_targets_total / max(known_targets_total, 1)
+    result["target_frame_coverage"] = tracked_target_frames_total / max(valid_target_frames_total, 1)
+    result["untracked_target_frames"] = untracked_target_frames_total
+    result["sequences"] = sequence_count
+    result["frames"] = frame_count
+    return result
 
 
-# ---------------------------------------------------------------------------
-# loss 曲线 PNG
-# ---------------------------------------------------------------------------
-def _plot_loss(train_hist, val_hist, path):
-    """把训练/校验损失画成曲线，保存 PNG（供外部实时刷新查看）。"""
-    plt.figure(figsize=(8, 5))
-    if train_hist:
-        xs, ys = zip(*train_hist)
-        plt.plot(xs, ys, label='train loss', color='tab:blue')
-    if val_hist:
-        vxs, vys = zip(*val_hist)
-        plt.plot(vxs, vys, label='val loss', marker='o', markersize=3, color='tab:red')
-    plt.xlabel('step')
-    plt.ylabel('loss')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(path, dpi=110)
-    plt.close()
+def _append_csv(path, row):
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(row))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 
-# ---------------------------------------------------------------------------
-# 训练主循环
-# ---------------------------------------------------------------------------
-def run_training(device, model, mapper, res_gru, scorer, optimizer,
-                 train_loader, val_loader, banks, csv_path, plot_path):
-    """训练主循环：跑 EPOCHS 个 epoch，每 epoch 校验/记日志/存 checkpoint，返回最优 val_loss。
-
-    逻辑与原 train_tracker.py 的 main() 训练循环完全一致，仅从 main 抽离成函数。
-
-    Args:
-        device      : torch.device
-        model       : Mymodule（M1，冻结；冷启动时为 None）
-        mapper/res_gru/scorer : M4/M5/M6（可训练）
-        optimizer   : Adam
-        train_loader/val_loader : 数据加载器（冷启动产出 4 元组，否则 2 元组）
-        banks       : list[TrackBank]
-        csv_path    : train_log.csv 路径（header 已由 main 写好）
-        plot_path   : loss_curve.png 路径
-
-    Returns:
-        best_val : float  历史最优 val_loss
-    """
-    global_step = 0
-    best_val = float('inf')
-    train_hist = []     # (step, 平均 train loss)
-    val_hist = []       # (step, val loss)
-
-    for epoch in range(1, EPOCHS + 1):
-        mapper.train(); res_gru.train(); scorer.train()
-        run_loss, run_n = 0.0, 0
-        t0 = time.time()
-
-        total_batches = len(train_loader)             # 进度条分母（本 epoch 的 batch 数）
-        for i, batch in enumerate(train_loader):
-            optimizer.zero_grad()
-            if IS_COLD:
-                out, conf, feat, gt = batch           # [B,T,50,4]/[B,T,50,2]/[B,T,50,128]/[B,T,3,2]
-                out = out.to(device)
-                conf = conf.to(device)
-                feat = feat.to(device)
-                gt = gt.to(device)
-                loss, n, assign_hist = forward_batch_cold(
-                    out, conf, feat, gt, banks, mapper, res_gru, scorer, epoch=epoch)
+def run_training(device, model, tracker, optimizer, train_loader, val_dataset,
+                 banks, csv_path, show_progress=config.SHOW_PROGRESS):
+    """训练 tracker，并保存独立 checkpoint；返回最小验证损失。"""
+    best_val = float("inf")
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    for epoch in range(1, config.EPOCHS + 1):
+        tracker.train()
+        train_total = 0.0
+        train_count = 0
+        started = time.time()
+        train_progress = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{config.EPOCHS} [train]",
+            unit="batch",
+            dynamic_ncols=True,
+            leave=False,
+            disable=not show_progress,
+        )
+        for batch in train_progress:
+            batch = _to_device(batch, device)
+            optimizer.zero_grad(set_to_none=True)
+            if config.IS_COLD:
+                out, conf, feat, gt = batch
+                loss, n_frames, _ = forward_batch_cold(out, conf, feat, gt, banks, tracker)
             else:
-                signals, gt = batch                  # [B,T,8,89,10]/[B,T,3,2]
-                signals = signals.to(device)
-                gt = gt.to(device)
-                loss, n, assign_hist = forward_batch(
-                    signals, gt, model, banks, mapper, res_gru, scorer, epoch=epoch)
+                signals, gt = batch
+                loss, n_frames, _ = forward_batch(signals, gt, model, banks, tracker)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("non-finite tracker training loss")
             loss.backward()
             optimizer.step()
+            train_total += float(loss.detach().item()) * n_frames
+            train_count += n_frames
+            train_progress.set_postfix(
+                loss=f"{train_total / max(train_count, 1):.5f}",
+                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+            )
 
-            global_step += 1
-            run_loss += loss.item() * n
-            run_n += n
+        train_loss = train_total / max(train_count, 1)
+        val_metrics = evaluate_full_sequence_dataset(
+            val_dataset,
+            model,
+            tracker,
+            banks,
+            device,
+            show_progress=show_progress,
+            progress_desc=f"Epoch {epoch}/{config.EPOCHS} [val]",
+        )
+        _append_csv(csv_path, {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_metrics["loss"],
+            "val_association": val_metrics["association"],
+            "val_position": val_metrics["position"],
+            "val_existence": val_metrics["existence"],
+            "val_confidence": val_metrics["confidence"],
+            "val_idsw": val_metrics["idsw"],
+            "val_mae_m": val_metrics["mae_m"],
+            "val_rmse_m": val_metrics["rmse_m"],
+            "val_miss_retention": val_metrics["miss_retention"],
+            "val_observed_count": val_metrics["observed_count"],
+            "val_predicted_count": val_metrics["predicted_count"],
+            "val_target_coverage": val_metrics["target_coverage"],
+            "val_target_frame_coverage": val_metrics["target_frame_coverage"],
+            "val_untracked_target_frames": val_metrics["untracked_target_frames"],
+            "elapsed_seconds": round(time.time() - started, 2),
+        })
 
-            # 当前滑动窗口的平均损失（自上次重置起），展示与落点共用同一值
-            avg = run_loss / run_n
-
-            # 每 LOG_EVERY 步落一个点到 loss 曲线，并重置滑动平均
-            if global_step % LOG_EVERY == 0:
-                train_hist.append((global_step, avg))
-                run_loss, run_n = 0.0, 0
-
-            # 实时刷新 loss 曲线
-            if global_step % PLOT_EVERY == 0:
-                _plot_loss(train_hist, val_hist, plot_path)
-
-            # 进度条：\r 覆盖本 epoch 的同一行（end='' 不换行，flush 实时可见）
-            frac = (i + 1) / total_batches
-            n_bar = 30
-            filled = int(round(n_bar * frac))
-            bar = '#' * filled + '-' * (n_bar - filled)
-            print(f'\r[epoch {epoch:2d}/{EPOCHS}] |{bar}| {i + 1:4d}/{total_batches}  '
-                  f'loss={loss.item():.4f}  avg={avg:.4f}  分配={assign_hist}  '
-                  f'{time.time() - t0:.0f}s',
-                  end='', flush=True)
-
-        # 本 epoch 进度条行结束，换行后再打印校验结果（下一个 epoch 另起一行）
-        print()
-
-        # ---- 每 epoch 校验 ----
-        val_loss = evaluate(val_loader, model, mapper, res_gru, scorer, banks, epoch=epoch)
-        val_hist.append((global_step, val_loss))
-        print(f'=== epoch {epoch}/{EPOCHS} 结束: val_loss={val_loss:.4f}  '
-              f'best={best_val:.4f} ===', flush=True)
-        with open(csv_path, 'a') as f:
-            f.write(f'{global_step},{epoch},{val_loss:.6f}\n')
-
-        # ---- checkpoint ----
-        ckpt = {
-            'epoch': epoch,
-            'mapper': mapper.state_dict(),
-            'res_gru': res_gru.state_dict(),
-            'scorer': scorer.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'val_loss': val_loss,
+        checkpoint = {
+            "epoch": epoch,
+            "tracker_state_dict": tracker.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "train_loss": train_loss,
+            "val_metrics": val_metrics,
+            "tracker_loss_weights": dict(config.TRACKER_LOSS_WEIGHTS),
+            "config": {
+                "hist_len": config.HIST_LEN,
+                "num_tracks": config.NUM_TRACKS,
+                "feat_dim": config.FEAT_DIM,
+                "dt": config.DT,
+                "confirm_threshold": config.CONFIRM_THRESHOLD,
+                "assoc_label_radius_m": config.ASSOC_LABEL_RADIUS_M,
+            },
         }
-        torch.save(ckpt, os.path.join(OUT_DIR, 'last.pth'))
-        if val_loss < best_val:
-            best_val = val_loss
-            torch.save(ckpt, os.path.join(OUT_DIR, 'best.pth'))
-            print(f'    >> 保存新最优 checkpoint (val_loss={best_val:.4f})', flush=True)
-
-        _plot_loss(train_hist, val_hist, plot_path)
-
+        torch.save(checkpoint, os.path.join(config.OUT_DIR, "joint_tracker_last.pth"))
+        if val_metrics["loss"] < best_val:
+            best_val = val_metrics["loss"]
+            torch.save(checkpoint, os.path.join(config.OUT_DIR, "joint_tracker_best.pth"))
+        print(
+            f"epoch {epoch}/{config.EPOCHS}: train={train_loss:.5f} "
+            f"val={val_metrics['loss']:.5f} assoc={val_metrics['association']:.5f} "
+            f"pos={val_metrics['position']:.5f} IDSW={val_metrics['idsw']} "
+            f"MAE={val_metrics['mae_m']:.3f}m "
+            f"coverage={val_metrics['target_coverage']:.2f} ({time.time() - started:.1f}s)",
+            flush=True,
+        )
     return best_val

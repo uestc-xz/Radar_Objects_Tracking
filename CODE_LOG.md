@@ -1,5 +1,18 @@
 # 代码变更日志
 
+## my_track 联合航迹模块 — 2026-10-21 至 2026-10-22
+
+- 目标：用固定身份槽的联合 tracker 替换旧的逐帧一对一关联训练路径；按候选融合、预测/观测状态分离和整记录身份连续性组织实现。
+- 配置：新增监督半径、身份确认初值、漏检置信度衰减、质量标签尺度、Transformer 结构、M1 分块大小及四项损失权重。旧 `CONF_THRESHOLD` 仅保留兼容，不用于新 tracker 门控。
+- `association.py` 输入/输出：候选 `[B,M,2]` 与 GT `[B,3,2]` 生成固定槽标签 `[B,M]`；`tracker_losses` 返回 association/position/existence/confidence 四项标量。支持空 GT、同槽多个候选和有限梯度。
+- `joint_tracker.py` 输入/输出：`Measurements(pos[B,50,2],score[B,50],feat[B,50,128])` 与 TrackBank 状态字典，输出四类候选关联及 `[B,3]` 槽位坐标/观测/置信字段。候选不做一对一匹配；槽内按 M1 score 加权，回归头可纠正至候选范围外。
+- `track_state.py` 输入/输出：每帧模型最终坐标、融合特征、观测标记和概率，更新三槽历史并供下一帧导出。HIST_LEN 预热后按滚动存在均值确认；确认 ID 不因漏检清除。
+- `train_tracker.py` / `train.py`：冷路径直接接缓存，暖路径冻结并分块运行 M1；滑窗所有帧计算损失，窗口起点 reset。只优化 JointTracker；验证按完整文件夹逐帧回放并记录 IDSW、欧氏位置误差、目标覆盖率、漏检保持、观测/预测计数。
+- 训练可观测性：新增 `SHOW_PROGRESS` 开关；每个 epoch 分别显示训练 batch 和验证序列进度，动态更新平均 loss、学习率及累计验证帧数，结束汇总格式保持不变。
+- `track_sequence_dataset.py` / `metrics.py`：默认窗口模式保持原行为；新增只返回帧路径索引的 full-sequence 模式，整序列验证按需读取。槽位映射在 warm-up 只初始化一次并固定。
+- 验证：补齐目标覆盖率与训练进度行为测试后，全量 27 项标准库测试通过；`py_compile` 与 `git diff --check` 通过。
+- 未验证：未读取真实 M1 缓存做正标签比例/确认阈值扫描；未运行长序列训练；未覆盖已有 `original/my_track/runs/` 文件。
+
 ## 数据集探索 — 2026-06-29
 
 - 样本路径：`E:\Jupyter\track\fast_dataset_multi_train/` 和 `fast_dataset_multi_test/`

@@ -33,10 +33,28 @@ LR             = 1e-3
 CLUTTER_WEIGHT = 0.01   # 杂波类 CE 权重 λ（<1 = 压背景权重，让前景/航迹项主导损失；别设 0，否则不学拒绝杂波）
 CLUTTER_WEIGHT_STEP = 0.03   # λ 每 epoch 的步进量：λ(epoch)=CLUTTER_WEIGHT+(epoch-1)*STEP；正=递增、负=递减、0=关闭
 DT             = 0.24  # 帧间隔（秒）
-CONF_THRESHOLD = 0.96  # 量测置信度阈值 τ：s_i≥τ 才作为候选目标参与匹配（前端定位标定值）
+CONF_THRESHOLD = 0.96  # 旧关联脚本遗留值；联合跟踪器不以 M1 score 做硬门控
 ADD_NOISE      = True
 MAX_VAL_WIN    = None  # 每 epoch 校验窗口数上限；None=全量（慢时可设 200）
 
 LOG_EVERY   = 20       # 每 N 步把当前平均损失落一个点到 loss 曲线（滑动平均窗口长度）
 PLOT_EVERY  = 50       # 每 N 步刷新一次 loss 曲线
+SHOW_PROGRESS = True   # 显示每个 epoch 的训练 batch 与验证序列进度
 SEED        = 0
+
+# ==================== 联合航迹网络 ====================
+ASSOC_LABEL_RADIUS_M = 1.0       # 仅定义候选关联正标签，不作推理门控
+CONFIRM_THRESHOLD = 0.5           # HIST_LEN 预热后的平均存在概率确认初值
+MISS_CONFIDENCE_DECAY = 0.95      # 每帧漏检时的航迹置信度衰减
+TRACK_QUALITY_SCALE_M = 0.5       # exp(-位置误差/尺度) 的软质量标签尺度
+TRACKER_D_MODEL = 128
+TRACKER_ENCODER_LAYERS = 2
+TRACKER_ATTENTION_HEADS = 4
+TRACKER_FFN_DIM = 256
+M1_BATCH_SIZE = 64                 # 暖路径分块前向，限制显存占用
+TRACKER_LOSS_WEIGHTS = {
+    "association": 2.0,
+    "position": 1.0,
+    "existence": 0.25,
+    "confidence": 0.1,
+}
