@@ -119,6 +119,76 @@ class LifecycleEvaluationTests(unittest.TestCase):
                              changed['sequences'][0]['prediction_digest'])
             self.assertNotEqual(recovered['summary']['tp'], changed['summary']['tp'])
 
+    def test_stricter_diagnostic_is_separate_from_original_matching_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache, label = root / 'cache.npz', root / 'label.npy'
+            np.savez(cache, out=np.asarray([[1., 2., .4, .4]]), conf=np.asarray([[0., 10.]]))
+            np.save(label, np.tile([1.8, 2., 0, 0, 0, 0], (10, 1)))
+            records = [{'folder': name, 'frames': [(cache, label, 0)]}
+                       for name in ('20240913_1_1', '20240913_1_2')]
+            data = evaluate_records(records, ['lifecycle'], hist_len=1)['variants']['lifecycle']
+            self.assertEqual(data['summary']['tp'], 2)
+            self.assertEqual(data['summary_0_5m']['tp'], 0)
+            self.assertEqual(data['summary_0_5m']['fp'], 2)
+            self.assertEqual(data['summary_0_5m']['fn'], 2)
+            self.assertIsNone(data['summary_0_5m']['matched_mae_m'])
+
+    def test_existing_default_comparison_still_accepts_joint_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache, label = root / 'cache.npz', root / 'label.npy'
+            np.savez(cache, out=np.asarray([[1., 2., .4, .4]]), conf=np.asarray([[0., 10.]]))
+            np.save(label, np.tile([1., 2., 0, 0, 0, 0], (10, 1)))
+            record = {'folder': '20240913_1_1', 'frames': [(cache, label, 0)]}
+            data = evaluate_records([record], hist_len=1, association_policy='joint')['variants']['lifecycle']
+            self.assertEqual(data['summary']['tp'], 1)
+            self.assertEqual(data['sequences'][0]['settings']['association_policy'], 'joint')
+
+    def test_history_variant_runs_history_association_and_ignores_changed_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frames = []
+            sequence = ([[0, 2], [1.9, 2]],) * 3 + ([[.99, 2], [1.9, 2]], [[0, 2], [1.1, 2]])
+            for index, points in enumerate(sequence):
+                cache, label = root / f'{index}.npz', root / f'{index}.npy'
+                np.savez(cache, out=np.column_stack([points, np.ones((2, 2))]),
+                         conf=np.tile([0., 10.], (2, 1)))
+                np.save(label, np.tile([0., 2., 1.9, 2., 0, 0], (10, 1)))
+                frames.append((cache, label, index))
+            records = [{'folder': '20240913_2_1', 'frames': frames}]
+            names = ['lifecycle', 'history_motion', 'history_motion_recovery']
+            result = evaluate_records(records, names, hist_len=4)['variants']
+            self.assertNotEqual(result['lifecycle']['sequences'][0]['evidence_digest'],
+                                result['history_motion']['sequences'][0]['evidence_digest'])
+            for _, label, _ in frames:
+                np.save(label, np.tile([-2., 5., -2., 3., 0, 0], (10, 1)))
+            changed = evaluate_records(records, names, hist_len=4)['variants']
+            for name in names:
+                self.assertEqual(result[name]['sequences'][0]['prediction_digest'],
+                                 changed[name]['sequences'][0]['prediction_digest'])
+
+    def test_recent_priority_variants_execute_their_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frames = []
+            for index, points in enumerate(([[0, 2], [.8, 2]], [[0, 2]], [[.45, 2]])):
+                cache, label = root / f'{index}.npz', root / f'{index}.npy'
+                np.savez(cache, out=np.column_stack([points, np.ones((len(points), 2))]),
+                         conf=np.tile([0., 10.], (len(points), 1)))
+                np.save(label, np.tile([0., 2., .8, 2., 0, 0], (10, 1)))
+                frames.append((cache, label, index))
+            records = [{'folder': '20240913_2_1', 'frames': frames}]
+            names = ['lifecycle', 'recent_priority', 'recent_priority_recovery',
+                     'recent_priority_stale', 'recent_priority_stale_recovery']
+            result = evaluate_records(records, names, hist_len=1)['variants']
+            self.assertNotEqual(result['lifecycle']['sequences'][0]['evidence_digest'],
+                                result['recent_priority']['sequences'][0]['evidence_digest'])
+            self.assertEqual(result['recent_priority']['sequences'][0]['evidence_digest'],
+                             result['recent_priority_recovery']['sequences'][0]['evidence_digest'])
+            self.assertEqual(result['recent_priority']['sequences'][0]['evidence_digest'],
+                             result['recent_priority_stale']['sequences'][0]['evidence_digest'])
+
 
 if __name__ == '__main__':
     unittest.main()

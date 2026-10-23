@@ -16,18 +16,27 @@ from original.my_dataset.track_sequence_dataset import TrackSequenceColdDataset
 from original.my_track import config
 from original.my_track.lifecycle_tracker import LifecycleTracker
 from original.my_track.identity_recovery import IdentityRecoveryTracker
+from original.my_track.history_motion import HistoryMotionTracker
+from original.my_track.recent_priority import RecentPriorityTracker
 from original.my_track.m1_temporal_baseline import TemporalCandidateTracker
 from original.my_track.tracking_diagnostics import tracking_diagnostics
 from scripts.evaluate_m1_temporal_baseline import _identity_switches, known_target_count
 
 
-VARIANTS = (
+DEFAULT_VARIANTS = (
     'simple_miss0', 'simple_miss1', 'lifecycle', 'lifecycle_known',
     'lifecycle_known_no_death', 'lifecycle_no_weak', 'lifecycle_no_coast',
     'lifecycle_short_confirm',
     'lifecycle_cascade',
     'lifecycle_joint',
     'recovery_local', 'recovery_reachable', 'recovery_known',
+)
+
+# 新策略显式 opt-in，保留旧默认对照及 --association-policy joint 的可复现性。
+VARIANTS = DEFAULT_VARIANTS + (
+    'history_motion', 'history_motion_recovery',
+    'recent_priority', 'recent_priority_recovery',
+    'recent_priority_stale', 'recent_priority_stale_recovery',
 )
 
 
@@ -56,8 +65,16 @@ def _tracker(variant, folder, hist_len, association_policy):
         settings['association_policy'] = 'cascade'
     if variant == 'lifecycle_joint':
         settings['association_policy'] = 'joint'
-    tracker = LifecycleTracker(**settings)
-    if variant.startswith('recovery_'):
+    if variant.startswith('history_motion'):
+        tracker = HistoryMotionTracker(**settings, min_motion_points=4)
+        settings['history_motion'] = dict(window_steps=hist_len, min_motion_points=4)
+    elif variant.startswith('recent_priority'):
+        priority = dict(priority_gate_m=.5, require_stale='_stale' in variant)
+        tracker = RecentPriorityTracker(**settings, **priority)
+        settings['recent_priority'] = priority
+    else:
+        tracker = LifecycleTracker(**settings)
+    if variant.startswith('recovery_') or variant.endswith('_recovery'):
         recovery = dict(memory_steps=hist_len * 50, gate_m=1.,
                         gate_growth_m=0. if variant == 'recovery_local' else .02,
                         max_gate_m=7.64, ambiguity_margin_m=.5,
@@ -67,14 +84,14 @@ def _tracker(variant, folder, hist_len, association_policy):
     return tracker, settings
 
 
-def _summarize(sequences):
+def _summarize(sequences, metric_key='metrics'):
     additive = (
         'frames', 'tp', 'fp', 'fn', 'error_sum_m', 'predicted_points', 'gt_points',
         'gt_id_switches', 'track_owner_switches', 'fragments', 'emitted_tracks',
         'false_emitted_tracks', 'idtp', 'idfp', 'idfn', 'coasted_tp', 'coasted_fp',
         'legacy_owner_switches',
     )
-    totals = {key: sum(row['metrics'][key] for row in sequences) for key in additive}
+    totals = {key: sum(row[metric_key][key] for row in sequences) for key in additive}
     tp, fp, fn = totals['tp'], totals['fp'], totals['fn']
     totals.update(
         precision=tp / (tp + fp) if tp + fp else 0.,
@@ -87,7 +104,7 @@ def _summarize(sequences):
     return totals
 
 
-def evaluate_records(records, variants=VARIANTS, hist_len=config.HIST_LEN, progress=None,
+def evaluate_records(records, variants=DEFAULT_VARIANTS, hist_len=config.HIST_LEN, progress=None,
                      association_policy='cascade'):
     """每条记录重置所有方法；完整保留标签原槽、确认前缀和输出指纹。"""
     variants = tuple(variants)
@@ -155,17 +172,23 @@ def evaluate_records(records, variants=VARIANTS, hist_len=config.HIST_LEN, progr
         targets = np.asarray(targets)
         for name, tracker in trackers.items():
             metrics = tracking_diagnostics(outputs[name], targets)
+            strict_metrics = tracking_diagnostics(outputs[name], targets, gate_m=.5)
             metrics['legacy_owner_switches'] = _identity_switches(
                 [o.positions for o in outputs[name]], targets, [o.track_ids for o in outputs[name]],
             )
+            strict_metrics['legacy_owner_switches'] = _identity_switches(
+                [o.positions for o in outputs[name]], targets, [o.track_ids for o in outputs[name]], gate_m=.5,
+            )
             result['variants'][name]['sequences'].append({
                 'folder': folder, 'settings': settings[name], 'metrics': metrics,
+                'metrics_0_5m': strict_metrics,
                 'management': dict(tracker.statistics) if hasattr(tracker, 'statistics') else None,
                 'prediction_digest': hashes[name].hexdigest(),
                 'evidence_digest': evidence_hashes[name].hexdigest(),
             })
     for data in result['variants'].values():
         data['summary'] = _summarize(data['sequences'])
+        data['summary_0_5m'] = _summarize(data['sequences'], 'metrics_0_5m')
     return result
 
 
@@ -174,7 +197,7 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--max-frames', type=int, default=0, help='每序列前缀；0=完整记录')
     parser.add_argument('--hist-len', type=int, default=config.HIST_LEN)
-    parser.add_argument('--variants', choices=VARIANTS, nargs='+', default=list(VARIANTS))
+    parser.add_argument('--variants', choices=VARIANTS, nargs='+', default=list(DEFAULT_VARIANTS))
     parser.add_argument('--association-policy', choices=('cascade', 'joint'), default='cascade')
     args = parser.parse_args(argv)
     if args.output.exists():
@@ -201,7 +224,7 @@ def main(argv=None):
         'schema_version': 2,
         'mode': 'frozen-M1 independent lifecycle comparison; validation exploration',
         'metric_contract': 'gated 1-to-1 distance diagnostics; not official MOTChallenge/HOTA',
-        'match_radius_m': 1., 'hist_len': args.hist_len,
+        'match_radius_m': 1., 'additional_diagnostic_radius_m': .5, 'hist_len': args.hist_len,
         'association_policy': args.association_policy,
         'data_root': config.VAL_ROOT,
         'cache_root': str(Path(config.CACHE_ROOT) / 'fast_dataset_multi_test'),

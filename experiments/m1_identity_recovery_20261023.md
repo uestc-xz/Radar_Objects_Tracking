@@ -122,5 +122,5 @@ python -B -m py_compile original/my_track/identity_recovery.py scripts/evaluate_
 
 原始 smoke/full JSON 为 `original/my_track/runs/identity_recovery_smoke_20261023.json`
 和 `original/my_track/runs/identity_recovery_full_20261023.json`，已有结果禁止覆盖。
-Git：未提交，交由用户手动提交，建议中文备注“新增航迹片段身份恢复及完整对照验证”。
+Git：用户已手动提交为 `90e1c6d`，中文备注“新增航迹片段身份恢复及完整对照验证”。
 只提交本模块文件，不包含已有训练代码修改或旧未跟踪实验。
