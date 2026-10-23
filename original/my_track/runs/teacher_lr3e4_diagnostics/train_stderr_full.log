@@ -1,0 +1,30 @@
+Epoch 1/50 [train]:   0%|          | 0/73 [00:00<?, ?batch/s]                                                             Traceback (most recent call last):
+  File "E:\Jupyter\NewMOTR\original\my_track\train_tracker.py", line 226, in <module>
+    main()
+  File "E:\Jupyter\NewMOTR\original\my_track\train_tracker.py", line 222, in main
+    run_training(device, model, tracker, optimizer, train_loader, val_ds, banks, csv_path)
+  File "E:\Jupyter\NewMOTR\original\my_track\train.py", line 230, in run_training
+    loss, n_frames, _, _trajectory, loss_parts = forward_batch_cold(
+  File "E:\Jupyter\NewMOTR\original\my_track\train_tracker.py", line 142, in forward_batch_cold
+    return _forward_sequences(
+  File "E:\Jupyter\NewMOTR\original\my_track\train_tracker.py", line 85, in _forward_sequences
+    output = tracker(
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "E:\Jupyter\NewMOTR\original\my_track\joint_tracker.py", line 185, in forward
+    candidate_tokens = self.candidate_projection(candidate_input)
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\container.py", line 250, in forward
+    input = module(input)
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "E:\Miniconda3\lib\site-packages\torch\nn\modules\activation.py", line 734, in forward
+    return F.gelu(input, approximate=self.approximate)
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 6.00 GiB of which 3.79 GiB is free. Of the allocated memory 1.15 GiB is allocated by PyTorch, and 62.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

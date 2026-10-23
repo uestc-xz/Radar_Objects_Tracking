@@ -112,12 +112,45 @@ def association_loss(logits, labels, clutter_weight=None, epoch=0):
     return torch.stack(losses).mean()
 
 
+@torch.no_grad()
+def association_diagnostics(logits, labels):
+    """返回关联正确数与真类概率和，供训练/验证日志按样本数汇总。
+
+    背景候选占多数，因此额外提供正候选（foreground）的独立统计；这些量只做
+    诊断，既不参与损失，也不影响关联、融合或航迹状态。
+    """
+    if logits.ndim != 3 or logits.shape[-1] != 4:
+        raise ValueError("logits must have shape [B,M,4]")
+    if labels.shape != logits.shape[:2] or labels.dtype not in (torch.int32, torch.int64):
+        raise ValueError("labels must be integer tensor with shape [B,M]")
+    _require_finite("logits", logits)
+    if labels.numel() and ((labels < 0).any() or (labels > 3).any()):
+        raise ValueError("labels must be in [0,3]")
+    if labels.device != logits.device:
+        raise ValueError("labels and logits must be on the same device")
+
+    probabilities = logits.softmax(dim=-1)
+    true_probability = probabilities.gather(-1, labels.long().unsqueeze(-1)).squeeze(-1)
+    correct = logits.argmax(dim=-1).eq(labels)
+    foreground = labels.ne(0)
+    return {
+        "correct": correct.sum(),
+        "count": torch.tensor(labels.numel(), device=logits.device),
+        "true_probability_sum": true_probability.sum(),
+        "foreground_correct": (correct & foreground).sum(),
+        "foreground_count": foreground.sum(),
+        "foreground_true_probability_sum": true_probability[foreground].sum(),
+    }
+
+
 def tracker_losses(association_logits, labels, final_pos, existence_prob,
-                   track_confidence, gt_pos, quality_scale_m=TRACK_QUALITY_SCALE_M):
+                   track_confidence, gt_pos, quality_scale_m=TRACK_QUALITY_SCALE_M,
+                   framewise_position=False):
     """计算关联、最终位置、存在概率及航迹软质量四项标量损失。
 
     位置只在非空 GT 槽上监督。存在概率对三槽使用 BCE；质量目标为空槽取 0，
     有效槽取 `exp(-位置误差 / quality_scale_m)`，以保留坐标误差的软置信信息。
+    framewise_position 仅供并行验证使用，保留原先逐帧等权的位置损失口径。
     """
     if final_pos.ndim != 3 or final_pos.shape[1:] != (3, 2):
         raise ValueError("final_pos must have shape [B,3,2]")
@@ -138,7 +171,13 @@ def tracker_losses(association_logits, labels, final_pos, existence_prob,
 
     valid_gt = gt_pos.abs().sum(dim=-1) > 0
     if valid_gt.any():
-        position = F.smooth_l1_loss(final_pos[valid_gt], gt_pos[valid_gt])
+        if framewise_position:
+            position_terms = F.smooth_l1_loss(final_pos, gt_pos, reduction="none")
+            position_sums = (position_terms * valid_gt.unsqueeze(-1)).sum(dim=(1, 2))
+            coordinate_counts = 2 * valid_gt.sum(dim=1)
+            position = (position_sums / coordinate_counts.clamp_min(1)).mean()
+        else:
+            position = F.smooth_l1_loss(final_pos[valid_gt], gt_pos[valid_gt])
         error = torch.linalg.vector_norm(final_pos.detach() - gt_pos, dim=-1)
         quality_target = torch.exp(-error / quality_scale_m) * valid_gt.to(final_pos.dtype)
     else:

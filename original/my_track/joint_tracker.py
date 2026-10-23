@@ -3,7 +3,9 @@
 输入是完整 M1 候选集合 `[B,50]` 和 TrackBank 状态；输出是每候选的杂波/固定槽关联，
 以及三个独立槽位的融合量测、历史预测、最终坐标、存在概率和航迹置信度。位置单位为米。
 训练时关联采用 straight-through hard one-hot：前向保证候选唯一归属，反向保留 softmax 梯度。
+课程训练可用 GT 候选标签替换或混合融合分配；默认值保持自主关联推理语义。
 """
+import math
 from typing import NamedTuple
 
 import torch
@@ -148,10 +150,36 @@ class JointTracker(nn.Module):
         if any(state[key].device != pos.device for key in required):
             raise ValueError("measurement and state tensors must share a device")
 
-    def forward(self, measurements, state, dt=0.24):
+    def _validate_teacher_assignment(self, labels, ratio, batch, device):
+        if not isinstance(ratio, (int, float)) or not math.isfinite(float(ratio)):
+            raise ValueError("teacher_assignment_ratio must be a finite scalar")
+        if not 0.0 <= float(ratio) <= 1.0:
+            raise ValueError("teacher_assignment_ratio must be in [0, 1]")
+        if labels is None:
+            if ratio != 0:
+                raise ValueError("teacher_assignment_labels are required when teacher_assignment_ratio is positive")
+            return
+        if labels.shape != (batch, 50) or labels.dtype not in (torch.int32, torch.int64):
+            raise ValueError("teacher_assignment_labels must be integer tensor with shape [B,50]")
+        if labels.device != device:
+            raise ValueError("teacher_assignment_labels must share the measurement device")
+        if labels.numel() and ((labels < 0).any() or (labels > self.num_tracks).any()):
+            raise ValueError("teacher_assignment_labels must be in [0, num_tracks]")
+
+    def forward(self, measurements, state, dt=0.24, teacher_assignment_labels=None,
+                teacher_assignment_ratio=0.0):
+        """预测单帧航迹状态。
+
+        `teacher_assignment_labels` 是训练期由 GT 构造的 `[B,50]` 类别标签。比例为 1
+        时仅按教师标签融合，比例为 0 时严格复用模型的 ST 自主分配；关联 logits 始终
+        由模型输出，供关联 CE 独立训练。
+        """
         self._validate_inputs(measurements, state, dt)
         pos, score, feat = measurements
         batch = pos.shape[0]
+        self._validate_teacher_assignment(
+            teacher_assignment_labels, teacher_assignment_ratio, batch, pos.device
+        )
 
         candidate_input = torch.cat((pos, score.unsqueeze(-1), feat), dim=-1)
         candidate_tokens = self.candidate_projection(candidate_input)
@@ -203,15 +231,20 @@ class JointTracker(nn.Module):
         assignment_onehot = hard_onehot - assignment_prob.detach() + assignment_prob
         assignments = hard_onehot.argmax(dim=-1)
 
+        if teacher_assignment_labels is not None:
+            teacher_onehot = F.one_hot(
+                teacher_assignment_labels.to(torch.long), num_classes=self.num_tracks + 1
+            ).to(pos.dtype)
+            ratio = float(teacher_assignment_ratio)
+            assignment_onehot = (1.0 - ratio) * assignment_onehot + ratio * teacher_onehot
+
         track_weights = assignment_onehot[..., 1:] * score.unsqueeze(-1)
         weight_sum = track_weights.sum(dim=1)
         denominator = weight_sum.clamp_min(torch.finfo(pos.dtype).tiny)
         fused_pos = torch.einsum("bmk,bmd->bkd", track_weights, pos) / denominator.unsqueeze(-1)
         fused_feat = torch.einsum("bmk,bmd->bkd", track_weights, feat) / denominator.unsqueeze(-1)
-        selected = assignments.unsqueeze(-1) == torch.arange(
-            1, self.num_tracks + 1, device=pos.device
-        ).view(1, 1, -1)
-        observed = (selected & (score.unsqueeze(-1) > 0)).any(dim=1)
+        # 有效融合权重才代表本帧对该槽的量测支持；ratio=0 时等价于原 hard assignment。
+        observed = weight_sum > 0
 
         regression_context = torch.cat((
             track_context,

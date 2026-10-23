@@ -96,6 +96,61 @@ class JointTrackerTests(unittest.TestCase):
         self.assertIsNotNone(self.model.correction_head[-1].weight.grad)
         self.assertGreater(self.model.correction_head[-1].weight.grad.abs().sum().item(), 0.0)
 
+    def test_teacher_assignment_controls_fusion_at_full_ratio(self):
+        with torch.no_grad():
+            self.model.pair_head[-1].weight.zero_()
+            self.model.pair_head[-1].bias.zero_()
+            self.model.clutter_head[-1].weight.zero_()
+            self.model.clutter_head[-1].bias.fill_(-100.0)
+            self.model.slot_embedding.zero_()
+        teacher_labels = torch.zeros(1, 50, dtype=torch.long)
+        teacher_labels[0, 0] = 2
+
+        result = self.model(
+            self.measurements, make_state(), dt=0.24,
+            teacher_assignment_labels=teacher_labels,
+            teacher_assignment_ratio=1.0,
+        )
+
+        self.assertTrue((result.assignments == 1).all())
+        self.assertFalse(result.observed[0, 0])
+        self.assertTrue(result.observed[0, 1])
+        torch.testing.assert_close(result.fused_pos[0, 1], self.measurements.pos[0, 0])
+
+    def test_tiny_positive_score_preserves_normalized_fusion(self):
+        measurements = Measurements(
+            pos=torch.tensor([2.0, 4.0]).expand(1, 50, 2),
+            score=torch.full((1, 50), 1e-6),
+            feat=torch.ones(1, 50, 128),
+        )
+        teacher_labels = torch.zeros(1, 50, dtype=torch.long)
+        teacher_labels[0, 0] = 1
+        result = self.model(
+            measurements, make_state(), teacher_assignment_labels=teacher_labels,
+            teacher_assignment_ratio=1.0,
+        )
+        self.assertTrue(result.observed[0, 0])
+        torch.testing.assert_close(result.fused_pos[0, 0], measurements.pos[0, 0])
+        torch.testing.assert_close(result.fused_feat[0, 0], measurements.feat[0, 0])
+
+    def test_zero_teacher_ratio_is_identical_to_predicted_fusion(self):
+        baseline = self.model(self.measurements, make_state(), dt=0.24)
+        teacher_labels = torch.full((1, 50), 3, dtype=torch.long)
+        mixed = self.model(
+            self.measurements, make_state(), dt=0.24,
+            teacher_assignment_labels=teacher_labels,
+            teacher_assignment_ratio=0.0,
+        )
+
+        torch.testing.assert_close(mixed.assignment_onehot, baseline.assignment_onehot)
+        torch.testing.assert_close(mixed.fused_pos, baseline.fused_pos)
+        torch.testing.assert_close(mixed.final_pos, baseline.final_pos)
+        self.assertTrue(torch.equal(mixed.observed, baseline.observed))
+
+    def test_teacher_ratio_requires_labels(self):
+        with self.assertRaisesRegex(ValueError, "teacher_assignment_labels"):
+            self.model(self.measurements, make_state(), teacher_assignment_ratio=0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

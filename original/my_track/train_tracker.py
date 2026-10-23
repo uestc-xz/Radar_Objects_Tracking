@@ -16,7 +16,11 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from original.my_dataset import load_track_sequence_dataset, load_track_sequence_cold_dataset
-from original.my_track.association import build_assignment_targets, tracker_losses
+from original.my_track.association import (
+    association_diagnostics,
+    build_assignment_targets,
+    tracker_losses,
+)
 from original.my_track.config import (
     ADD_NOISE,
     BATCH_SIZE,
@@ -44,11 +48,15 @@ from original.my_track.track_state import TrackBank, batch_track_states
 
 
 def _forward_sequences(coor, conf, feat, gt, banks, tracker, dt=DT,
-                       return_details=False, reset_state=True):
+                       return_details=False, reset_state=True, teacher_assignment_ratio=0.0,
+                       loss_weights=None, framewise_loss=False):
     """对 `[B,T]` 缓存/M1 输出做逐帧联合跟踪并计算所有帧损失。
 
     每个滑窗开始时清空其状态，所有 `B*T` 帧均参与损失。状态库只接收 detach 后的
     模型输出，因此窗口内不跨帧保留 autograd 图；返回轨迹张量可直接用于指标。
+    loss_weights 只控制总损失加权，默认沿用验证权重；loss_parts 返回当前路径的未加权值。
+    训练使用单路径教师课程，按 teacher_assignment_ratio 从 GT 融合过渡到自主融合。
+    framewise_loss=True 仅用于并行验证，先对每个样本计算损失再等权平均。
     """
     if coor.ndim != 4 or coor.shape[2:] != (50, 2):
         raise ValueError("coor must have shape [B,T,50,2]")
@@ -63,32 +71,41 @@ def _forward_sequences(coor, conf, feat, gt, banks, tracker, dt=DT,
         raise ValueError("one TrackBank is required for each batch item")
     if frames < 1:
         raise ValueError("a training window must contain at least one frame")
-
     if reset_state:
         for bank in banks[:batch]:
             bank.reset(device=coor.device, dtype=coor.dtype)
 
+    weights = TRACKER_LOSS_WEIGHTS if loss_weights is None else loss_weights
     loss_sums = {name: [] for name in TRACKER_LOSS_WEIGHTS}
     frame_losses = []
     assign_hist = [0, 0, 0, 0]
     pos_steps, observed_steps, active_steps = [], [], []
+    association_stat_sums = None
 
     for time_idx in range(frames):
         measurement = generate_measurements(coor[:, time_idx], conf[:, time_idx], feat[:, time_idx])
         state = batch_track_states(banks[:batch], device=coor.device)
-        output = tracker(measurement, state, dt=dt)
         labels = build_assignment_targets(measurement.pos, gt[:, time_idx])
-        losses = tracker_losses(
-            output.association_logits,
-            labels,
-            output.final_pos,
-            output.existence_prob,
-            output.track_confidence,
-            gt[:, time_idx],
+        output = tracker(
+            measurement, state, dt=dt,
+            teacher_assignment_labels=labels if teacher_assignment_ratio > 0 else None,
+            teacher_assignment_ratio=teacher_assignment_ratio,
         )
+        losses = tracker_losses(
+            output.association_logits, labels, output.final_pos,
+            output.existence_prob, output.track_confidence, gt[:, time_idx],
+            framewise_position=framewise_loss,
+        )
+        if return_details:
+            diagnostics = association_diagnostics(output.association_logits, labels)
+            if association_stat_sums is None:
+                association_stat_sums = {name: value.clone() for name, value in diagnostics.items()}
+            else:
+                for name, value in diagnostics.items():
+                    association_stat_sums[name] = association_stat_sums[name] + value
         for name, value in losses.items():
             loss_sums[name].append(value)
-        frame_losses.append(sum(TRACKER_LOSS_WEIGHTS[name] * losses[name] for name in losses))
+        frame_losses.append(sum(weights[name] * losses[name] for name in losses))
         for class_id in range(4):
             assign_hist[class_id] += int((output.assignments == class_id).sum().item())
 
@@ -111,19 +128,25 @@ def _forward_sequences(coor, conf, feat, gt, banks, tracker, dt=DT,
         "observed": torch.stack(observed_steps, dim=1),
         "active": torch.stack(active_steps, dim=1),
     }
+    if return_details:
+        trajectory["association_stats"] = association_stat_sums
     loss_parts = {name: torch.stack(values).mean() for name, values in loss_sums.items()}
     result = (mean_loss, batch * frames, assign_hist)
     return result + (trajectory, loss_parts) if return_details else result
 
 
 def forward_batch_cold(out, conf, feat, gt, banks, tracker, dt=DT,
-                       return_details=False, reset_state=True):
+                       return_details=False, reset_state=True, teacher_assignment_ratio=0.0,
+                       loss_weights=None, framewise_loss=False):
     """冷路径：直接消费缓存 `[B,T,50,{4,2,128}]`，不构造或调用 M1。"""
     if out.ndim != 4 or out.shape[-2:] != (50, 4):
         raise ValueError("out must have shape [B,T,50,4]")
     return _forward_sequences(
         out[..., :2], conf, feat, gt, banks, tracker, dt,
         return_details=return_details, reset_state=reset_state,
+        teacher_assignment_ratio=teacher_assignment_ratio,
+        loss_weights=loss_weights,
+        framewise_loss=framewise_loss,
     )
 
 
@@ -145,7 +168,8 @@ def run_frozen_m1(signals, model, m1_batch_size=M1_BATCH_SIZE):
 
 
 def forward_batch(signals, gt, model, banks, tracker, dt=DT, m1_batch_size=M1_BATCH_SIZE,
-                  return_details=False, reset_state=True):
+                  return_details=False, reset_state=True, teacher_assignment_ratio=0.0,
+                  loss_weights=None, framewise_loss=False):
     """暖路径：分块运行冻结 M1，再调用与冷路径相同的逐帧跟踪核心。"""
     if signals.ndim != 5:
         raise ValueError("signals must have shape [B,T,8,89,10]")
@@ -158,6 +182,9 @@ def forward_batch(signals, gt, model, banks, tracker, dt=DT, m1_batch_size=M1_BA
     return _forward_sequences(
         out[..., :2], conf, feat, gt, banks, tracker, dt,
         return_details=return_details, reset_state=reset_state,
+        teacher_assignment_ratio=teacher_assignment_ratio,
+        loss_weights=loss_weights,
+        framewise_loss=framewise_loss,
     )
 
 

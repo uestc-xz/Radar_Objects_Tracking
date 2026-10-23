@@ -1,0 +1,23 @@
+Epoch 1/50 [train]:   0%|          | 0/73 [00:00<?, ?batch/s]Traceback (most recent call last):
+  File "E:\Jupyter\NewMOTR\original\my_track\train_tracker.py", line 226, in <module>
+    main()
+  File "E:\Jupyter\NewMOTR\original\my_track\train_tracker.py", line 222, in main
+    run_training(device, model, tracker, optimizer, train_loader, val_ds, banks, csv_path)
+  File "E:\Jupyter\NewMOTR\original\my_track\train.py", line 217, in run_training
+    train_progress = tqdm(
+  File "E:\Miniconda3\lib\site-packages\tqdm\asyncio.py", line 33, in __init__
+    self.iterable_iterator = iter(iterable)
+  File "E:\Miniconda3\lib\site-packages\torch\utils\data\dataloader.py", line 491, in __iter__
+    return self._get_iterator()
+  File "E:\Miniconda3\lib\site-packages\torch\utils\data\dataloader.py", line 422, in _get_iterator
+    return _MultiProcessingDataLoaderIter(self)
+  File "E:\Miniconda3\lib\site-packages\torch\utils\data\dataloader.py", line 1107, in __init__
+    self._worker_result_queue = multiprocessing_context.Queue()  # type: ignore[var-annotated]
+  File "E:\Miniconda3\lib\multiprocessing\context.py", line 103, in Queue
+    return Queue(maxsize, ctx=self.get_context())
+  File "E:\Miniconda3\lib\multiprocessing\queues.py", line 42, in __init__
+    self._reader, self._writer = connection.Pipe(duplex=False)
+  File "E:\Miniconda3\lib\multiprocessing\connection.py", line 558, in Pipe
+    h2 = _winapi.CreateFile(
+PermissionError: [WinError 5] ¾Ü¾ø·ÃÎÊ¡£
+                                                             

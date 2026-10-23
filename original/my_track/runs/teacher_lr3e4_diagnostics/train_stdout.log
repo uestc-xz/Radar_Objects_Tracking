@@ -1,0 +1,13 @@
+设备: cuda
+加载冷启动跟踪序列数据集 (滑窗 50/25)
+数据目录: E:\Jupyter\track\fast_dataset_multi_train
+缓存目录: E:\Jupyter\NewMOTR数据集\fast_dataset_multi_train
+跟踪序列数据集加载完成：25 个文件夹，2340 个窗口
+  窗口长度=50，步长=25（overlap=25）
+  数据根目录: E:\Jupyter\track\fast_dataset_multi_train
+加载冷启动跟踪序列数据集 (滑窗 50/49)
+数据目录: E:\Jupyter\track\fast_dataset_multi_test
+缓存目录: E:\Jupyter\NewMOTR数据集\fast_dataset_multi_test
+跟踪序列数据集加载完成：8 个文件夹，8 个完整序列
+  窗口长度=50，步长=49（overlap=1）
+  数据根目录: E:\Jupyter\track\fast_dataset_multi_test

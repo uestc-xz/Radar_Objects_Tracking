@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from original.my_track.association import (
+    association_diagnostics,
     association_loss,
     build_assignment_targets,
     tracker_losses,
@@ -40,6 +41,25 @@ class AssociationTargetTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertTrue(torch.isfinite(logits.grad).all())
 
+    def test_association_diagnostics_separate_foreground_from_clutter(self):
+        logits = torch.tensor([[[10.0, 0.0, 0.0, 0.0],
+                                [0.0, 0.0, 0.0, 10.0],
+                                [0.0, 0.0, 0.0, 10.0]]])
+        labels = torch.tensor([[0, 2, 1]])
+
+        diagnostics = association_diagnostics(logits, labels)
+
+        self.assertEqual(diagnostics["count"].item(), 3)
+        self.assertEqual(diagnostics["correct"].item(), 1)
+        self.assertEqual(diagnostics["foreground_count"].item(), 2)
+        self.assertEqual(diagnostics["foreground_correct"].item(), 0)
+        expected_probability_sum = logits.softmax(dim=-1).gather(
+            -1, labels.unsqueeze(-1)
+        ).sum()
+        torch.testing.assert_close(
+            diagnostics["true_probability_sum"], expected_probability_sum
+        )
+
     def test_tracker_losses_cover_all_terms_and_backpropagate(self):
         logits = torch.randn(1, 4, 4, requires_grad=True)
         final_pos = torch.randn(1, 3, 2, requires_grad=True)
@@ -71,6 +91,22 @@ class AssociationTargetTests(unittest.TestCase):
 
         self.assertEqual(losses["position"].item(), 0.0)
         self.assertTrue(all(torch.isfinite(loss) for loss in losses.values()))
+
+    def test_framewise_validation_loss_matches_independent_frame_average(self):
+        gt = torch.tensor([[[1., 2.], [0., 0.], [0., 0.]],
+                           [[1., 2.], [2., 3.], [3., 4.]],
+                           [[0., 0.], [0., 0.], [0., 0.]]])
+        final_pos = gt + torch.tensor([1., 3., 5.]).reshape(3, 1, 1)
+        inputs = (torch.zeros(3, 2, 4), torch.zeros(3, 2, dtype=torch.long),
+                  final_pos, torch.full((3, 3), 0.4), torch.full((3, 3), 0.2), gt)
+        serial = [tracker_losses(*(value[idx:idx + 1] for value in inputs))
+                  for idx in range(3)]
+        parallel = tracker_losses(*inputs, framewise_position=True)
+        for name in parallel:
+            torch.testing.assert_close(
+                parallel[name], torch.stack([loss[name] for loss in serial]).mean())
+        torch.testing.assert_close(parallel["position"], torch.tensor(1.0))
+        self.assertNotEqual(parallel["position"].item(), tracker_losses(*inputs)["position"].item())
 
 
 if __name__ == "__main__":
