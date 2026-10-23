@@ -88,6 +88,37 @@ class LifecycleEvaluationTests(unittest.TestCase):
                 main(['--output', str(target)])
             self.assertEqual(json.loads(target.read_text(encoding='utf-8')), {'keep': 1})
 
+    def test_identity_recovery_preserves_detection_and_changes_fragment_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frames = []
+            # hist_len=1，连续两帧漏检后旧状态删除；第 3 步附近出现新确认片段。
+            for index, points in enumerate(([[1., 2.]], [], [], [[1.2, 2.]])):
+                cache, label = root / f'{index}.npz', root / f'{index}.npy'
+                points = np.asarray(points).reshape(-1, 2)
+                np.savez(cache, out=np.column_stack([points, np.ones((len(points), 2))]),
+                         conf=np.tile([0., 10.], (len(points), 1)))
+                np.save(label, np.tile([1., 2., 0, 0, 0, 0], (10, 1)))
+                frames.append((cache, label, index))
+            result = evaluate_records([{'folder': '20240913_1_1', 'frames': frames}],
+                                      ['lifecycle', 'recovery_local'], hist_len=1)['variants']
+            baseline, recovered = result['lifecycle'], result['recovery_local']
+            self.assertEqual(baseline['summary']['gt_id_switches'], 1)
+            self.assertEqual(recovered['summary']['gt_id_switches'], 0)
+            for key in ('tp', 'fp', 'fn', 'error_sum_m', 'coasted_tp', 'coasted_fp'):
+                self.assertEqual(baseline['summary'][key], recovered['summary'][key])
+            self.assertEqual(baseline['sequences'][0]['evidence_digest'],
+                             recovered['sequences'][0]['evidence_digest'])
+            self.assertEqual(recovered['sequences'][0]['management']['recovered'], 1)
+            # 同样候选和片段边界，换掉所有 GT 坐标也不得改变恢复后的完整输出。
+            for _, label, _ in frames:
+                np.save(label, np.tile([-2., 5., 0, 0, 0, 0], (10, 1)))
+            changed = evaluate_records([{'folder': '20240913_1_1', 'frames': frames}],
+                                       ['recovery_local'], hist_len=1)['variants']['recovery_local']
+            self.assertEqual(recovered['sequences'][0]['prediction_digest'],
+                             changed['sequences'][0]['prediction_digest'])
+            self.assertNotEqual(recovered['summary']['tp'], changed['summary']['tp'])
+
 
 if __name__ == '__main__':
     unittest.main()

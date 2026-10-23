@@ -134,6 +134,6 @@ python scripts/evaluate_m1_lifecycle.py --association-policy joint --variants li
 下一阶段优先做失联后的可靠再捕获、历史约束下的多人候选分离，不优先扩大网络或
 重新调整训练损失。当前身份 F1 仅 .3965，不能宣称已达到稳定完整跟踪水平。
 
-Git：本模块由用户手动提交，建议备注“新增独立航迹生命周期管理并记录完整验证结果”。
+Git：本模块已由用户手动提交为 `8f434d1`，备注“新增独立航迹生命周期管理并记录完整验证结果”。
 包含三个源模块、独立评估入口、三组测试、SPEC/CODE_LOG、两份实验文档和四份
 `original/my_track/runs/lifecycle*.json` 原始结果；不包含其他已有训练修改或模型权重。

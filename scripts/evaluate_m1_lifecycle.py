@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from original.my_dataset.track_sequence_dataset import TrackSequenceColdDataset
 from original.my_track import config
 from original.my_track.lifecycle_tracker import LifecycleTracker
+from original.my_track.identity_recovery import IdentityRecoveryTracker
 from original.my_track.m1_temporal_baseline import TemporalCandidateTracker
 from original.my_track.tracking_diagnostics import tracking_diagnostics
 from scripts.evaluate_m1_temporal_baseline import _identity_switches, known_target_count
@@ -26,6 +27,7 @@ VARIANTS = (
     'lifecycle_short_confirm',
     'lifecycle_cascade',
     'lifecycle_joint',
+    'recovery_local', 'recovery_reachable', 'recovery_known',
 )
 
 
@@ -40,7 +42,7 @@ def _tracker(variant, folder, hist_len, association_policy):
                     output_max_missed=2, confidence_decay=.95, output_confidence=.5,
                     velocity_alpha=.2, max_step_m=.2, prediction_decay=.8,
                     no_death=False, weak_updates=True, association_policy=association_policy)
-    if variant in ('lifecycle_known', 'lifecycle_known_no_death'):
+    if variant in ('lifecycle_known', 'lifecycle_known_no_death', 'recovery_known'):
         settings['max_tracks'] = known_target_count(folder)
     if variant == 'lifecycle_known_no_death':
         settings['no_death'] = True
@@ -54,7 +56,15 @@ def _tracker(variant, folder, hist_len, association_policy):
         settings['association_policy'] = 'cascade'
     if variant == 'lifecycle_joint':
         settings['association_policy'] = 'joint'
-    return LifecycleTracker(**settings), settings
+    tracker = LifecycleTracker(**settings)
+    if variant.startswith('recovery_'):
+        recovery = dict(memory_steps=hist_len * 50, gate_m=1.,
+                        gate_growth_m=0. if variant == 'recovery_local' else .02,
+                        max_gate_m=7.64, ambiguity_margin_m=.5,
+                        known_count=known_target_count(folder) if variant == 'recovery_known' else None)
+        tracker = IdentityRecoveryTracker(tracker, **recovery)
+        settings['identity_recovery'] = recovery
+    return tracker, settings
 
 
 def _summarize(sequences):
@@ -92,6 +102,7 @@ def evaluate_records(records, variants=VARIANTS, hist_len=config.HIST_LEN, progr
             raise ValueError(f'empty sequence: {folder}')
         trackers, settings, outputs = {}, {}, {name: [] for name in variants}
         hashes = {name: hashlib.sha256() for name in variants}
+        evidence_hashes = {name: hashlib.sha256() for name in variants}
         for name in variants:
             trackers[name], settings[name] = _tracker(name, folder, hist_len, association_policy)
         targets, sample_ids = [], []
@@ -123,9 +134,12 @@ def evaluate_records(records, variants=VARIANTS, hist_len=config.HIST_LEN, progr
             for name, tracker in trackers.items():
                 frame = tracker.update(positions, scores)
                 outputs[name].append(frame)
-                for array in frame:
+                for field, array in enumerate(frame):
                     hashes[name].update(str(array.shape).encode('ascii'))
                     hashes[name].update(array.tobytes())
+                    if field != 2:  # ID 外全部证据逐字节核对，行顺序也不得改变。
+                        evidence_hashes[name].update(str(array.shape).encode('ascii'))
+                        evidence_hashes[name].update(array.tobytes())
             if progress is not None and (frame_index % 1000 == 0 or frame_index + 1 == len(record['frames'])):
                 progress(folder, frame_index + 1, len(record['frames']))
         if any(b <= a for a, b in zip(sample_ids, sample_ids[1:])):
@@ -148,6 +162,7 @@ def evaluate_records(records, variants=VARIANTS, hist_len=config.HIST_LEN, progr
                 'folder': folder, 'settings': settings[name], 'metrics': metrics,
                 'management': dict(tracker.statistics) if hasattr(tracker, 'statistics') else None,
                 'prediction_digest': hashes[name].hexdigest(),
+                'evidence_digest': evidence_hashes[name].hexdigest(),
             })
     for data in result['variants'].values():
         data['summary'] = _summarize(data['sequences'])
