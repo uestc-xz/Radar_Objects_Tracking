@@ -1,11 +1,26 @@
 # 代码变更日志
 
+## 模块 20：独立置信度生命周期管理 — 2026-10-23（已验证）
+
+- 目的：改善误量测抑制、身份连续性和生命周期；保留现有 JointTracker、M1、训练配置与入口。
+- 依赖：基线提交 `335e652`；新实施细则见 `experiments/m1_lifecycle_20261023.md`。
+- 核心逻辑：高置信度出生与历史确认、已确认状态优先关联、弱量测续轨、有限预测输出与内部身份保留分离；无消亡模式只保留确认 ID，不无限输出预测点。
+- 语义纠错：模块 19 的 `max_missed=0` 是漏检立即删除，不是不消亡；F1=0.9154 的原始数值不变。旧 IDSW 是 nearest-owner 诊断，新增一对一 GT 换 ID、碎片化与全序列身份配对分数，旧基线同口径重跑。
+- 修改文件：新增 `lifecycle_tracker.py`、`gated_matching.py`、`tracking_diagnostics.py`、`scripts/evaluate_m1_lifecycle.py`、三组测试和实验记录；SPEC、本日志及旧时序文档作对应记录和语义纠错。
+- 输入/输出：每帧候选 `[N,2]` 米制坐标与概率 `[N]` -> 已确认输出点、置信度、局部递增 ID 与观测标记；每个记录独立 reset；无 GT 推理接口。
+- 验证命令：`python -B -m unittest discover -s tests/my_track -q`；`python -B -m py_compile original/my_track/gated_matching.py original/my_track/lifecycle_tracker.py original/my_track/tracking_diagnostics.py scripts/evaluate_m1_lifecycle.py`；两轮完整验证与复现命令见 `experiments/m1_lifecycle_20261023.md`。
+- 测试结果：新增三组测试先观察缺失模块失败；补充统一关联反例和策略参数传递的失败/通过验证。最终完整 my_track 共 123 项通过（新增 30 项，14.197s），静态编译通过，缓存读取及 GT 不影响推理的指纹检查通过。
+- 全量结果：8 条记录 17,421 帧，第一版八组、第二版六组对照。保留 cascade/HIST_LEN=20 自主模式：P=.9443、R=.8338、F1=.8856、MAE=.2805m、身份 F1=.3965、GT 换 ID=200、fragments=610、输出 ID=82。simple miss0 为 F1=.8610、身份 F1=.1219；simple miss1 为 F1=.8328、身份 F1=.1171、GT 换 ID=1539、FP=9099；新模块 FP=1589。第二版 cascade 的全部逐序列指纹与指标逐项复现第一版，最终默认 smoke 指纹亦一致。
+- 失败尝试：joint 高低分统一关联虽通过近处弱分反例，全量 F1=.8766、身份 F1=.3106，未设为默认；已知人数 + 不消亡的 cascade 召回仅 .6542，暴露旧身份占用容量、长期失联无法再捕获；3 帧确认增加 FP 和身份碎片。全部原始输出保留在 `original/my_track/runs/lifecycle*.json`。
+- 已知限制：三人近距离/交叉仍弱（最差三人身份 F1=.1481），匹配 MAE 是条件误差，不能据此宣称新坐标回归收益；身份 F1 是自定义门控诊断而非官方 MOTChallenge。原训练入口与网络未接入此模块，当前结果是验证集探索。后续优先多人候选分离和失联再捕获。
+- Git 节点：本模块未提交；用户手动提交，备注使用中文。
+
 ## 模块 19 扩展：已知序列目标数的理想化航迹管理对照 — 2026-10-23
 
-- 目的：在不改变默认自主模式的前提下，验证“每条记录目标数固定且已知、目标不消亡”这一数据条件对航迹管理上限的影响。
+- 目的：在不改变默认自主模式的前提下，验证已知序列目标数与漏检保留时长的影响；真正“不消亡”的身份保留实现及失败分析见模块 20。
 - 修改文件：`scripts/evaluate_m1_temporal_baseline.py`、`tests/my_track/test_m1_temporal_baseline.py`、`experiments/m1_temporal_baseline_20261023.md`、`SPEC.md`。
 - 核心逻辑：新增 `known_target_count`，从序列目录名 `<date>_<target_count>_<variant>` 读取数量；`--known-target-count` 只将数量传给 `TemporalCandidateTracker.max_tracks`，不读 GT 坐标、不读 GT 槽 ID、不替系统做关联。
-- 验证：全量验证 8 条记录、17,421 帧。自主最多 3 条且 `max_missed=1` 为 P=0.7647/R=0.9144/F1=0.8328；已知数量为 P=0.9094/R=0.8970/F1=0.9032；已知数量且 `max_missed=0` 为 P=0.9286/R=0.9025/F1=0.9154、MAE=0.2871m、IDSW=189。
+- 验证：全量验证 8 条记录、17,421 帧。自主最多 3 条且 `max_missed=1` 为 P=0.7647/R=0.9144/F1=0.8328；已知数量为 P=0.9094/R=0.8970/F1=0.9032；已知数量且 `max_missed=0`（漏检立即删除，并非不消亡）为 P=0.9286/R=0.9025/F1=0.9154、MAE=0.2871m、IDSW=189。基线提交 `335e652`。
 - 结论：目标数量与生命周期先验显著减少 FP，适合作为理想化上限而非默认能力；默认 tracker、训练逻辑和配置未改。完整结果见 `experiments/m1_temporal_baseline_20261023.md`。
 
 ## 模块 18：量测锚定残差与局部证据短训 — 2026-10-23
