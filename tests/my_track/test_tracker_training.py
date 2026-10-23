@@ -18,7 +18,11 @@ from original.my_track.train import (
     gradient_l2_norm,
     run_training,
 )
-from original.my_track.train_tracker import forward_batch, forward_batch_cold
+from original.my_track.train_tracker import (
+    canonicalize_ground_truth_tracks,
+    forward_batch,
+    forward_batch_cold,
+)
 
 
 class StubM1(nn.Module):
@@ -50,6 +54,31 @@ def make_inputs(batch=1, frames=3):
 
 
 class TrackerTrainingTests(unittest.TestCase):
+    def test_ground_truth_slots_are_canonicalized_once_and_keep_identity_through_crossing(self):
+        gt = torch.tensor([[[[2.0, 1.0], [-2.0, 1.0], [0.0, 0.0]],
+                            [[0.5, 1.0], [0.0, 1.0], [0.0, 0.0]],
+                            [[-2.0, 1.0], [2.0, 1.0], [0.0, 0.0]]]])
+
+        canonical = canonicalize_ground_truth_tracks(gt)
+
+        self.assertEqual(canonical.shape, gt.shape)
+        self.assertTrue(torch.equal(canonical[0, 0, 0], gt[0, 0, 1]))
+        self.assertTrue(torch.equal(canonical[0, 0, 1], gt[0, 0, 0]))
+        # The two trajectories cross in x, but their canonical identity order is fixed.
+        self.assertTrue(torch.equal(canonical[0, 2, 0], gt[0, 2, 1]))
+        self.assertTrue(torch.equal(canonical[0, 2, 1], gt[0, 2, 0]))
+        self.assertTrue(torch.equal(canonical[:, :, 2], torch.zeros_like(canonical[:, :, 2])))
+
+    def test_ground_truth_slot_with_late_first_observation_is_ordered_by_its_first_valid_position(self):
+        gt = torch.tensor([[[[1.0, 2.0], [0.0, 0.0], [0.0, 0.0]],
+                            [[1.5, 2.0], [-2.0, 4.0], [0.0, 0.0]],
+                            [[2.0, 2.0], [-1.5, 4.0], [0.0, 0.0]]]])
+
+        canonical = canonicalize_ground_truth_tracks(gt)
+
+        self.assertTrue(torch.equal(canonical[0, 1, 0], gt[0, 1, 1]))
+        self.assertTrue(torch.equal(canonical[0, 1, 1], gt[0, 1, 0]))
+
     def setUp(self):
         torch.manual_seed(12)
         self.tracker = JointTracker(hist_len=2)
@@ -128,13 +157,60 @@ class TrackerTrainingTests(unittest.TestCase):
                 self.assertIsNotNone(call.kwargs["teacher_assignment_labels"])
         self.assertEqual(self.banks[0].frames_seen, 2)
 
-    def test_diagnostic_learning_rate_and_gradient_norm_are_calibrated(self):
+    def test_gradient_norm_ignores_parameters_without_gradients(self):
         parameter = nn.Parameter(torch.tensor([0.0, 0.0]))
         parameter.grad = torch.tensor([3.0, 4.0])
         unused = nn.Parameter(torch.tensor([1.0]))
 
-        self.assertEqual(config.LR, 3e-4)
         self.assertEqual(gradient_l2_norm([parameter, unused]), 5.0)
+
+    def test_gradient_norm_does_not_overflow_on_large_finite_gradients(self):
+        parameter = nn.Parameter(torch.zeros(2))
+        parameter.grad = torch.tensor([3e30, 4e30])
+        self.assertAlmostEqual(gradient_l2_norm([parameter]) / 5e30, 1.0, places=6)
+
+    def test_training_rejects_nonfinite_gradients_before_adam_step(self):
+        out, conf, feat, gt = make_inputs(frames=1)
+        optimizer = torch.optim.Adam(self.tracker.parameters(), lr=3e-5)
+        handle = self.tracker.correction_head[-1].weight.register_hook(
+            lambda grad: torch.full_like(grad, float("nan")))
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with (patch.object(config, "EPOCHS", 1), patch.object(config, "IS_COLD", True)):
+                    with self.assertRaisesRegex(FloatingPointError, "gradient"):
+                        run_training(
+                            torch.device("cpu"), None, self.tracker, optimizer,
+                            [(out, conf, feat, gt)], [], self.banks,
+                            str(Path(temp_dir) / "log.csv"), show_progress=False,
+                        )
+            self.assertFalse(optimizer.state)
+        finally:
+            handle.remove()
+
+    def test_training_clips_gradients_before_adam_step(self):
+        out, conf, feat, gt = make_inputs(frames=1)
+        optimizer = torch.optim.Adam(self.tracker.parameters(), lr=3e-5)
+        norms_at_step = []
+        handle = optimizer.register_step_pre_hook(
+            lambda _optimizer, _args, _kwargs: norms_at_step.append(
+                gradient_l2_norm(self.tracker.parameters())))
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with (
+                    patch.object(config, "EPOCHS", 1), patch.object(config, "IS_COLD", True),
+                    patch.object(config, "OUT_DIR", temp_dir),
+                    patch.object(config, "TRACKER_MAX_GRAD_NORM", 0.01, create=True),
+                ):
+                    run_training(
+                        torch.device("cpu"), None, self.tracker, optimizer,
+                        [(out, conf, feat, gt)], [], self.banks,
+                        str(Path(temp_dir) / "log.csv"), show_progress=False,
+                    )
+            self.assertEqual(len(norms_at_step), 1)
+            self.assertLessEqual(norms_at_step[0], 0.010001)
+            self.assertGreater(norms_at_step[0], 0)
+        finally:
+            handle.remove()
 
     def test_full_sequence_validation_resets_once_and_reads_frames_lazily(self):
         with tempfile.TemporaryDirectory() as temp_dir:

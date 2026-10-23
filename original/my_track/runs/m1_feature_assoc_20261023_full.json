@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "mode": "opt-in recent M1 appearance association; GT used only for offline evaluation",
+  "feature_contract": "128-D cached M1 features; spatial gate first; appearance only on ambiguous valid edges",
+  "settings": {
+    "hist_len": 20,
+    "feature_weight": 0.35,
+    "max_feature_age": 8
+  },
+  "sequences": {
+    "spatial": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 2470,
+        "metrics": {
+          "frames": 2470,
+          "tp": 4810,
+          "fp": 625,
+          "fn": 2600,
+          "error_sum_m": 1858.9710784898343,
+          "predicted_points": 5435,
+          "gt_points": 7410,
+          "precision": 0.8850045998160073,
+          "recall": 0.6491228070175439,
+          "f1": 0.7489295445698716,
+          "matched_mae_m": 0.38648047369851024,
+          "gt_id_switches": 76,
+          "track_owner_switches": 73,
+          "fragments": 300,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 0,
+          "idtp": 951,
+          "idfp": 4484,
+          "idfn": 6459,
+          "identity_f1": 0.1480731802257688,
+          "coasted_tp": 366,
+          "coasted_fp": 120
+        },
+        "metrics_0_5m": {
+          "frames": 2470,
+          "tp": 3323,
+          "fp": 2112,
+          "fn": 4087,
+          "error_sum_m": 775.0750226636972,
+          "predicted_points": 5435,
+          "gt_points": 7410,
+          "precision": 0.6114075436982521,
+          "recall": 0.4484480431848853,
+          "f1": 0.517399766446088,
+          "matched_mae_m": 0.23324556806009544,
+          "gt_id_switches": 52,
+          "track_owner_switches": 32,
+          "fragments": 454,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 2,
+          "idtp": 729,
+          "idfp": 4706,
+          "idfn": 6681,
+          "identity_f1": 0.11350720124562086,
+          "coasted_tp": 214,
+          "coasted_fp": 272
+        },
+        "management": {
+          "created": 68,
+          "confirmed": 33,
+          "deleted": 65
+        }
+      }
+    ],
+    "feature": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 2470,
+        "metrics": {
+          "frames": 2470,
+          "tp": 4817,
+          "fp": 621,
+          "fn": 2593,
+          "error_sum_m": 1863.8050243341143,
+          "predicted_points": 5438,
+          "gt_points": 7410,
+          "precision": 0.8858036042662744,
+          "recall": 0.6500674763832659,
+          "f1": 0.7498443337484434,
+          "matched_mae_m": 0.38692236336601915,
+          "gt_id_switches": 76,
+          "track_owner_switches": 73,
+          "fragments": 300,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 0,
+          "idtp": 951,
+          "idfp": 4487,
+          "idfn": 6459,
+          "identity_f1": 0.14803860523038606,
+          "coasted_tp": 364,
+          "coasted_fp": 118
+        },
+        "metrics_0_5m": {
+          "frames": 2470,
+          "tp": 3324,
+          "fp": 2114,
+          "fn": 4086,
+          "error_sum_m": 775.794939558185,
+          "predicted_points": 5438,
+          "gt_points": 7410,
+          "precision": 0.61125413755057,
+          "recall": 0.448582995951417,
+          "f1": 0.5174346201743462,
+          "matched_mae_m": 0.23339197940980294,
+          "gt_id_switches": 52,
+          "track_owner_switches": 32,
+          "fragments": 456,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 2,
+          "idtp": 729,
+          "idfp": 4709,
+          "idfn": 6681,
+          "identity_f1": 0.11348069738480697,
+          "coasted_tp": 212,
+          "coasted_fp": 270
+        },
+        "management": {
+          "created": 68,
+          "confirmed": 33,
+          "deleted": 65
+        }
+      }
+    ]
+  }
+}

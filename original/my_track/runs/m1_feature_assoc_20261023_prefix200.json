@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "mode": "opt-in recent M1 appearance association; GT used only for offline evaluation",
+  "feature_contract": "128-D cached M1 features; spatial gate first; appearance only on ambiguous valid edges",
+  "settings": {
+    "hist_len": 20,
+    "feature_weight": 0.35,
+    "max_feature_age": 8
+  },
+  "sequences": {
+    "spatial": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 200,
+        "metrics": {
+          "frames": 200,
+          "tp": 428,
+          "fp": 5,
+          "fn": 172,
+          "error_sum_m": 85.31967400548798,
+          "predicted_points": 433,
+          "gt_points": 600,
+          "precision": 0.9884526558891455,
+          "recall": 0.7133333333333334,
+          "f1": 0.8286544046466602,
+          "matched_mae_m": 0.19934503272310275,
+          "gt_id_switches": 0,
+          "track_owner_switches": 0,
+          "fragments": 4,
+          "emitted_tracks": 3,
+          "false_emitted_tracks": 0,
+          "idtp": 428,
+          "idfp": 5,
+          "idfn": 172,
+          "identity_f1": 0.8286544046466602,
+          "coasted_tp": 23,
+          "coasted_fp": 2
+        },
+        "metrics_0_5m": {
+          "frames": 200,
+          "tp": 400,
+          "fp": 33,
+          "fn": 200,
+          "error_sum_m": 65.0885001278326,
+          "predicted_points": 433,
+          "gt_points": 600,
+          "precision": 0.9237875288683602,
+          "recall": 0.6666666666666666,
+          "f1": 0.7744433688286544,
+          "matched_mae_m": 0.1627212503195815,
+          "gt_id_switches": 0,
+          "track_owner_switches": 0,
+          "fragments": 22,
+          "emitted_tracks": 3,
+          "false_emitted_tracks": 0,
+          "idtp": 400,
+          "idfp": 33,
+          "idfn": 200,
+          "identity_f1": 0.7744433688286544,
+          "coasted_tp": 19,
+          "coasted_fp": 6
+        },
+        "management": {
+          "created": 10,
+          "confirmed": 3,
+          "deleted": 7
+        }
+      }
+    ],
+    "feature": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 200,
+        "metrics": {
+          "frames": 200,
+          "tp": 428,
+          "fp": 5,
+          "fn": 172,
+          "error_sum_m": 85.31967400548798,
+          "predicted_points": 433,
+          "gt_points": 600,
+          "precision": 0.9884526558891455,
+          "recall": 0.7133333333333334,
+          "f1": 0.8286544046466602,
+          "matched_mae_m": 0.19934503272310275,
+          "gt_id_switches": 0,
+          "track_owner_switches": 0,
+          "fragments": 4,
+          "emitted_tracks": 3,
+          "false_emitted_tracks": 0,
+          "idtp": 428,
+          "idfp": 5,
+          "idfn": 172,
+          "identity_f1": 0.8286544046466602,
+          "coasted_tp": 23,
+          "coasted_fp": 2
+        },
+        "metrics_0_5m": {
+          "frames": 200,
+          "tp": 400,
+          "fp": 33,
+          "fn": 200,
+          "error_sum_m": 65.0885001278326,
+          "predicted_points": 433,
+          "gt_points": 600,
+          "precision": 0.9237875288683602,
+          "recall": 0.6666666666666666,
+          "f1": 0.7744433688286544,
+          "matched_mae_m": 0.1627212503195815,
+          "gt_id_switches": 0,
+          "track_owner_switches": 0,
+          "fragments": 22,
+          "emitted_tracks": 3,
+          "false_emitted_tracks": 0,
+          "idtp": 400,
+          "idfp": 33,
+          "idfn": 200,
+          "identity_f1": 0.7744433688286544,
+          "coasted_tp": 19,
+          "coasted_fp": 6
+        },
+        "management": {
+          "created": 10,
+          "confirmed": 3,
+          "deleted": 7
+        }
+      }
+    ]
+  }
+}

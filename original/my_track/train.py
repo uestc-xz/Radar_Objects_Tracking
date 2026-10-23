@@ -4,6 +4,7 @@
 重置状态。新 checkpoint 与日志使用专属文件名，不覆盖旧实验产物。
 """
 import csv
+import math
 import os
 import time
 
@@ -16,6 +17,7 @@ from original.my_track.metrics import sequence_tracking_metrics
 from original.my_track.train_tracker import (
     forward_batch,
     forward_batch_cold,
+    canonicalize_ground_truth_tracks,
     run_frozen_m1,
 )
 
@@ -25,11 +27,11 @@ def _to_device(batch, device):
 
 
 def gradient_l2_norm(parameters):
-    """返回当前梯度的全局 L2 范数；无梯度参数不计入。"""
+    """返回裁剪前全局 L2 范数；float64 累加避免有限 float32 梯度平方溢出。"""
     squared_sum = 0.0
     for parameter in parameters:
         if parameter.grad is not None:
-            squared_sum += float(parameter.grad.detach().square().sum().item())
+            squared_sum += float(parameter.grad.detach().to(torch.float64).square().sum().item())
     return squared_sum ** 0.5
 
 
@@ -88,6 +90,17 @@ def evaluate_full_sequence_dataset(dataset, model, tracker, banks, device,
         records = [dataset[idx] for idx in range(
             batch_start, min(batch_start + sequence_batch_size, sequence_count)
         )]
+        # Cache small GT arrays once and keep a stable canonical identity order per recording.
+        gt_sequences = []
+        for record in records:
+            if record["frames"]:
+                gt_sequence = torch.stack([
+                    torch.from_numpy(np.load(label_path).mean(axis=0).reshape(3, 2).astype(np.float32))
+                    for _data_path, label_path, _sample_id in record["frames"]
+                ])
+                gt_sequences.append(canonicalize_ground_truth_tracks(gt_sequence))
+            else:
+                gt_sequences.append(torch.empty((0, config.NUM_TRACKS, 2), dtype=torch.float32))
         batch_banks = banks[:len(records)]
         for bank in batch_banks:
             bank.reset(device=device, dtype=torch.float32)
@@ -106,23 +119,21 @@ def evaluate_full_sequence_dataset(dataset, model, tracker, banks, device,
             active_banks = [batch_banks[idx] for idx in active_indices]
             if is_cold:
                 outs, confs, feats, gts = [], [], [], []
-                for cache_path, label_path, _sample_id in frames:
+                for local_idx, (cache_path, _label_path, _sample_id) in zip(active_indices, frames):
                     with np.load(cache_path) as cached:
                         outs.append(torch.from_numpy(cached["out"].copy()))
                         confs.append(torch.from_numpy(cached["conf"].copy()))
                         feats.append(torch.from_numpy(cached["feat"].copy()))
-                    label_array = np.load(label_path)
-                    gts.append(torch.from_numpy(label_array).mean(dim=0).reshape(3, 2))
+                    gts.append(gt_sequences[local_idx][time_idx])
                 out = torch.stack(outs, dim=0).to(device).unsqueeze(1)
                 conf = torch.stack(confs, dim=0).to(device).unsqueeze(1)
                 feat = torch.stack(feats, dim=0).to(device).unsqueeze(1)
                 gt = torch.stack(gts, dim=0).to(device).unsqueeze(1)
             else:
                 signals, gts = [], []
-                for signal_path, label_path, _sample_id in frames:
+                for local_idx, (signal_path, _label_path, _sample_id) in zip(active_indices, frames):
                     signals.append(torch.from_numpy(np.load(signal_path)))
-                    label_array = np.load(label_path)
-                    gts.append(torch.from_numpy(label_array).mean(dim=0).reshape(3, 2))
+                    gts.append(gt_sequences[local_idx][time_idx])
                 signal = torch.stack(signals, dim=0).to(device)
                 out, conf, feat = run_frozen_m1(signal, model)
                 out, conf, feat = (value.unsqueeze(1) for value in (out, conf, feat))
@@ -245,6 +256,9 @@ def run_training(device, model, tracker, optimizer, train_loader, val_dataset,
                  banks, csv_path, show_progress=config.SHOW_PROGRESS):
     """训练 tracker，并保存独立 checkpoint；返回最小验证损失。"""
     best_val = float("inf")
+    max_grad_norm = float(config.TRACKER_MAX_GRAD_NORM)
+    if not math.isfinite(max_grad_norm) or max_grad_norm <= 0:
+        raise ValueError("TRACKER_MAX_GRAD_NORM must be finite and positive")
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     for epoch in range(1, config.EPOCHS + 1):
         tracker.train()
@@ -286,6 +300,15 @@ def run_training(device, model, tracker, optimizer, train_loader, val_dataset,
                 raise FloatingPointError("non-finite tracker training loss")
             loss.backward()
             gradient_norm = gradient_l2_norm(tracker.parameters())
+            if not math.isfinite(gradient_norm):
+                optimizer.zero_grad(set_to_none=True)
+                raise FloatingPointError("non-finite tracker gradient; optimizer step cancelled")
+            if gradient_norm > max_grad_norm:
+                # 使用已计算的 float64 范数，避免 float32 clip 的内部平方再次溢出。
+                scale = max_grad_norm / gradient_norm
+                for parameter in tracker.parameters():
+                    if parameter.grad is not None:
+                        parameter.grad.mul_(scale)
             optimizer.step()
             train_total += float(loss.detach().item()) * n_frames
             train_count += n_frames
@@ -372,6 +395,7 @@ def run_training(device, model, tracker, optimizer, train_loader, val_dataset,
                 "teacher_assoc_anneal_epochs": config.TEACHER_ASSOC_ANNEAL_EPOCHS,
                 "teacher_assignment_ratio": teacher_ratio,
                 "learning_rate": optimizer.param_groups[0]["lr"],
+                "tracker_max_grad_norm": max_grad_norm,
             },
         }
         torch.save(checkpoint, os.path.join(config.OUT_DIR, "joint_tracker_last.pth"))

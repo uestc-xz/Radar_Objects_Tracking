@@ -25,6 +25,8 @@ class _ManagedTrack:
     hits: deque
     confirmed: bool = False
     missed: int = 0
+    appearance: object = None
+    last_feature_step: int = -1
 
 
 class LifecycleTracker:
@@ -80,6 +82,7 @@ class LifecycleTracker:
     def reset(self):
         self._tracks = []
         self._next_id = 0
+        self._frame_index = 0
         self.statistics = {'created': 0, 'confirmed': 0, 'deleted': 0}
 
     def _predict(self, track, gap):
@@ -128,22 +131,51 @@ class LifecycleTracker:
         """默认所有确认状态一起配对；实验子类可增加可信内门的优先阶段。"""
         return [(indices, self.association_radius_m)]
 
-    def update(self, candidate_positions, candidate_scores):
+    def _tentative_weak_association_stages(self, indices):
+        """默认不允许暂定片段续接弱提议；独立实验子类可显式启用。"""
+        return []
+
+    def _proposal_features(self, positions, scores, features, primary, weak):
+        """按聚类结果产生外观提议；默认路径不使用 M1 特征。"""
+        return None, None
+
+    def _association_pairwise_penalty(self, indices, proposal_features, gate_m):
+        """额外的成对代价；基类保持 None，避免改变原关联结果。"""
+        return None
+
+    def _update_appearance(self, track, feature):
+        """仅由显式实验子类维护外观状态。"""
+        return None
+
+    def update(self, candidate_positions, candidate_scores, candidate_features=None):
         """输入本帧候选，输出已确认且当前仍允许报告的航迹点。"""
         primary, weak = self._proposals(candidate_positions, candidate_scores)
+        primary_features, weak_features = self._proposal_features(
+            candidate_positions, candidate_scores, candidate_features, primary, weak,
+        )
         matched_tracks, used_primary, used_weak = set(), set(), set()
 
-        def associate(indices, proposals, available, primary_count=None, radius_m=None):
+        def associate(indices, proposals, available, primary_count=None, radius_m=None,
+                      feature_values=None):
             if not indices or not available:
                 return
             predicted = self._association_predictions(indices)
             points = proposals.positions[available]
             penalty = .1 * (1 - proposals.scores[available])
             gate = self.association_radius_m if radius_m is None else radius_m
-            for row, col in gated_pairs(predicted, points, gate, penalty):
+            feature_set = (primary_features if proposals is primary else weak_features
+                           if proposals is weak else feature_values)
+            self._current_proposal_positions = points
+            pair_penalty = self._association_pairwise_penalty(
+                indices, None if feature_set is None else feature_set[available], gate,
+            )
+            for row, col in gated_pairs(predicted, points, gate, penalty, pair_penalty):
                 index, proposal_index = indices[row], available[col]
                 self._observe(self._tracks[index], proposals.positions[proposal_index],
                               proposals.scores[proposal_index])
+                self._update_appearance(
+                    self._tracks[index], None if feature_set is None else feature_set[proposal_index],
+                )
                 matched_tracks.add(index)
                 if proposals is primary or (primary_count is not None and proposal_index < primary_count):
                     used_primary.add(proposal_index)
@@ -159,8 +191,10 @@ class LifecycleTracker:
                 np.concatenate((primary.scores, weak.scores)),
                 np.concatenate((primary.sizes, weak.sizes)),
             )
+            combined_features = (None if primary_features is None or weak_features is None else
+                                 np.concatenate((primary_features, weak_features), axis=0))
             associate(confirmed, combined, list(range(len(combined.positions))),
-                      primary_count=len(primary.positions))
+                      primary_count=len(primary.positions), feature_values=combined_features)
         else:
             for indices, gate in self._confirmed_association_stages(confirmed):
                 associate([i for i in indices if i not in matched_tracks], primary,
@@ -169,6 +203,11 @@ class LifecycleTracker:
         associate(tentative, primary, [i for i in range(len(primary.positions)) if i not in used_primary])
         if self.weak_updates and self.association_policy == 'cascade':
             for indices, gate in self._confirmed_association_stages(confirmed):
+                associate([i for i in indices if i not in matched_tracks], weak,
+                          [i for i in range(len(weak.positions)) if i not in used_weak],
+                          radius_m=gate)
+            for indices, gate in self._tentative_weak_association_stages(tentative):
+                # 已确认片段先用弱提议，暂定片段只能取剩余且本步未被消费的量测。
                 associate([i for i in indices if i not in matched_tracks], weak,
                           [i for i in range(len(weak.positions)) if i not in used_weak],
                           radius_m=gate)
@@ -195,11 +234,15 @@ class LifecycleTracker:
                 self._next_id, primary.positions[index].copy(), np.zeros(2),
                 float(primary.scores[index]), deque([True], maxlen=self.hist_len),
             )
+            self._update_appearance(
+                track, None if primary_features is None else primary_features[index],
+            )
             self._next_id += 1
             self.statistics['created'] += 1
             self._confirm(track)
             retained.append(track)
         self._tracks = retained
+        self._frame_index += 1
         emitted = sorted((track for track in retained if track.confirmed and
                           (track.missed == 0 or (track.missed <= self.output_max_missed and
                                                 track.confidence >= self.output_confidence))),

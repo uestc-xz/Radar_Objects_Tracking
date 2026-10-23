@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "mode": "opt-in recent M1 appearance association; GT used only for offline evaluation",
+  "feature_contract": "128-D cached M1 features; spatial gate first; appearance only on ambiguous valid edges",
+  "settings": {
+    "hist_len": 20,
+    "feature_weight": 0.6,
+    "max_feature_age": 8
+  },
+  "sequences": {
+    "spatial": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 2470,
+        "metrics": {
+          "frames": 2470,
+          "tp": 4810,
+          "fp": 625,
+          "fn": 2600,
+          "error_sum_m": 1858.9710784898343,
+          "predicted_points": 5435,
+          "gt_points": 7410,
+          "precision": 0.8850045998160073,
+          "recall": 0.6491228070175439,
+          "f1": 0.7489295445698716,
+          "matched_mae_m": 0.38648047369851024,
+          "gt_id_switches": 76,
+          "track_owner_switches": 73,
+          "fragments": 300,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 0,
+          "idtp": 951,
+          "idfp": 4484,
+          "idfn": 6459,
+          "identity_f1": 0.1480731802257688,
+          "coasted_tp": 366,
+          "coasted_fp": 120
+        },
+        "metrics_0_5m": {
+          "frames": 2470,
+          "tp": 3323,
+          "fp": 2112,
+          "fn": 4087,
+          "error_sum_m": 775.0750226636972,
+          "predicted_points": 5435,
+          "gt_points": 7410,
+          "precision": 0.6114075436982521,
+          "recall": 0.4484480431848853,
+          "f1": 0.517399766446088,
+          "matched_mae_m": 0.23324556806009544,
+          "gt_id_switches": 52,
+          "track_owner_switches": 32,
+          "fragments": 454,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 2,
+          "idtp": 729,
+          "idfp": 4706,
+          "idfn": 6681,
+          "identity_f1": 0.11350720124562086,
+          "coasted_tp": 214,
+          "coasted_fp": 272
+        },
+        "management": {
+          "created": 68,
+          "confirmed": 33,
+          "deleted": 65
+        },
+        "feature_diagnostics": null,
+        "changed_assignment_frames_vs_spatial": 0
+      }
+    ],
+    "feature": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 2470,
+        "metrics": {
+          "frames": 2470,
+          "tp": 4821,
+          "fp": 640,
+          "fn": 2589,
+          "error_sum_m": 1865.3710555487287,
+          "predicted_points": 5461,
+          "gt_points": 7410,
+          "precision": 0.8828053470060429,
+          "recall": 0.6506072874493927,
+          "f1": 0.7491259420402455,
+          "matched_mae_m": 0.38692616792132933,
+          "gt_id_switches": 76,
+          "track_owner_switches": 75,
+          "fragments": 302,
+          "emitted_tracks": 32,
+          "false_emitted_tracks": 0,
+          "idtp": 951,
+          "idfp": 4510,
+          "idfn": 6459,
+          "identity_f1": 0.14777406572915858,
+          "coasted_tp": 358,
+          "coasted_fp": 117
+        },
+        "metrics_0_5m": {
+          "frames": 2470,
+          "tp": 3327,
+          "fp": 2134,
+          "fn": 4083,
+          "error_sum_m": 776.931532849456,
+          "predicted_points": 5461,
+          "gt_points": 7410,
+          "precision": 0.6092290789232742,
+          "recall": 0.4489878542510121,
+          "f1": 0.5169761479294538,
+          "matched_mae_m": 0.23352315384714636,
+          "gt_id_switches": 54,
+          "track_owner_switches": 34,
+          "fragments": 458,
+          "emitted_tracks": 32,
+          "false_emitted_tracks": 1,
+          "idtp": 729,
+          "idfp": 4732,
+          "idfn": 6681,
+          "identity_f1": 0.11327791158418149,
+          "coasted_tp": 212,
+          "coasted_fp": 263
+        },
+        "management": {
+          "created": 67,
+          "confirmed": 32,
+          "deleted": 64
+        },
+        "feature_diagnostics": {
+          "ambiguous_frames": 256,
+          "comparable_pairs": 484
+        },
+        "changed_assignment_frames_vs_spatial": 128
+      }
+    ]
+  }
+}

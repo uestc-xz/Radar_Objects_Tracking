@@ -47,6 +47,38 @@ from original.my_track.measurement import generate_measurements
 from original.my_track.track_state import TrackBank, batch_track_states
 
 
+def canonicalize_ground_truth_tracks(gt):
+    """以每条序列中各目标首次出现的位置排序槽位，并在整个序列固定映射。
+
+    接受 `[B,T,3,2]` 或 `[T,3,2]` 米制 GT；空槽排在有效目标之后。
+    该排序只规范化序列局部的标签编号，不代表跨记录的全局身份。
+    """
+    unbatched = gt.ndim == 3
+    if unbatched:
+        gt = gt.unsqueeze(0)
+    if gt.ndim != 4 or gt.shape[2:] != (NUM_TRACKS, 2):
+        raise ValueError("gt must have shape [B,T,3,2] or [T,3,2]")
+    if gt.shape[1] == 0:
+        raise ValueError("gt sequence must contain at least one frame")
+
+    canonical = []
+    track_indices = torch.arange(NUM_TRACKS, device=gt.device)
+    for sequence in gt:
+        valid = sequence.abs().sum(dim=-1) > 0
+        first_frame = valid.to(torch.int64).argmax(dim=0)
+        first_position = sequence[first_frame, track_indices]
+        present = valid.any(dim=0)
+        x_key = torch.where(present, first_position[:, 0], torch.full_like(first_position[:, 0], float("inf")))
+        y_key = torch.where(present, first_position[:, 1], torch.full_like(first_position[:, 1], float("inf")))
+
+        # Stable two-key sort: x first, then y; original slot order breaks exact ties.
+        order = torch.argsort(y_key, stable=True)
+        order = order[torch.argsort(x_key[order], stable=True)]
+        canonical.append(sequence.index_select(1, order))
+    result = torch.stack(canonical, dim=0)
+    return result[0] if unbatched else result
+
+
 def _forward_sequences(coor, conf, feat, gt, banks, tracker, dt=DT,
                        return_details=False, reset_state=True, teacher_assignment_ratio=0.0,
                        loss_weights=None, framewise_loss=False):
@@ -67,6 +99,8 @@ def _forward_sequences(coor, conf, feat, gt, banks, tracker, dt=DT,
         raise ValueError(f"feat must have shape [B,T,50,{FEAT_DIM}]")
     if gt.shape != (batch, frames, NUM_TRACKS, 2):
         raise ValueError("gt must have shape [B,T,3,2]")
+    # GT slot numbers are only sequence-local; use one stable geometric ordering per window.
+    gt = canonicalize_ground_truth_tracks(gt)
     if len(banks) < batch:
         raise ValueError("one TrackBank is required for each batch item")
     if frames < 1:

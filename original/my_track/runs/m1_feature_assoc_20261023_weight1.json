@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "mode": "opt-in recent M1 appearance association; GT used only for offline evaluation",
+  "feature_contract": "128-D cached M1 features; spatial gate first; appearance only on ambiguous valid edges",
+  "settings": {
+    "hist_len": 20,
+    "feature_weight": 1.0,
+    "max_feature_age": 8
+  },
+  "sequences": {
+    "spatial": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 2470,
+        "metrics": {
+          "frames": 2470,
+          "tp": 4810,
+          "fp": 625,
+          "fn": 2600,
+          "error_sum_m": 1858.9710784898343,
+          "predicted_points": 5435,
+          "gt_points": 7410,
+          "precision": 0.8850045998160073,
+          "recall": 0.6491228070175439,
+          "f1": 0.7489295445698716,
+          "matched_mae_m": 0.38648047369851024,
+          "gt_id_switches": 76,
+          "track_owner_switches": 73,
+          "fragments": 300,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 0,
+          "idtp": 951,
+          "idfp": 4484,
+          "idfn": 6459,
+          "identity_f1": 0.1480731802257688,
+          "coasted_tp": 366,
+          "coasted_fp": 120
+        },
+        "metrics_0_5m": {
+          "frames": 2470,
+          "tp": 3323,
+          "fp": 2112,
+          "fn": 4087,
+          "error_sum_m": 775.0750226636972,
+          "predicted_points": 5435,
+          "gt_points": 7410,
+          "precision": 0.6114075436982521,
+          "recall": 0.4484480431848853,
+          "f1": 0.517399766446088,
+          "matched_mae_m": 0.23324556806009544,
+          "gt_id_switches": 52,
+          "track_owner_switches": 32,
+          "fragments": 454,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 2,
+          "idtp": 729,
+          "idfp": 4706,
+          "idfn": 6681,
+          "identity_f1": 0.11350720124562086,
+          "coasted_tp": 214,
+          "coasted_fp": 272
+        },
+        "management": {
+          "created": 68,
+          "confirmed": 33,
+          "deleted": 65
+        },
+        "feature_diagnostics": null,
+        "changed_assignment_frames_vs_spatial": 0
+      }
+    ],
+    "feature": [
+      {
+        "folder": "20240913_3_8",
+        "frames": 2470,
+        "metrics": {
+          "frames": 2470,
+          "tp": 4781,
+          "fp": 665,
+          "fn": 2629,
+          "error_sum_m": 1860.8567700792025,
+          "predicted_points": 5446,
+          "gt_points": 7410,
+          "precision": 0.877892030848329,
+          "recall": 0.6452091767881242,
+          "f1": 0.7437772246421904,
+          "matched_mae_m": 0.3892191529134496,
+          "gt_id_switches": 77,
+          "track_owner_switches": 75,
+          "fragments": 305,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 0,
+          "idtp": 951,
+          "idfp": 4495,
+          "idfn": 6459,
+          "identity_f1": 0.14794648413192285,
+          "coasted_tp": 359,
+          "coasted_fp": 125
+        },
+        "metrics_0_5m": {
+          "frames": 2470,
+          "tp": 3285,
+          "fp": 2161,
+          "fn": 4125,
+          "error_sum_m": 770.9314688996511,
+          "predicted_points": 5446,
+          "gt_points": 7410,
+          "precision": 0.6031950055086301,
+          "recall": 0.4433198380566802,
+          "f1": 0.511045426260112,
+          "matched_mae_m": 0.23468233452044174,
+          "gt_id_switches": 55,
+          "track_owner_switches": 34,
+          "fragments": 456,
+          "emitted_tracks": 33,
+          "false_emitted_tracks": 1,
+          "idtp": 711,
+          "idfp": 4735,
+          "idfn": 6699,
+          "identity_f1": 0.11060983198506534,
+          "coasted_tp": 213,
+          "coasted_fp": 271
+        },
+        "management": {
+          "created": 64,
+          "confirmed": 33,
+          "deleted": 61
+        },
+        "feature_diagnostics": {
+          "ambiguous_frames": 257,
+          "comparable_pairs": 486
+        },
+        "changed_assignment_frames_vs_spatial": 2332
+      }
+    ]
+  }
+}

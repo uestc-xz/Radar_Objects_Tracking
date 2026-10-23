@@ -4,6 +4,7 @@ import torch
 
 from original.my_track.measurement import Measurements
 from original.my_track.joint_tracker import JointTracker
+from original.my_track.association import build_assignment_targets, tracker_losses
 
 
 def make_state(batch=1, hist_len=4, initialized=False):
@@ -42,6 +43,21 @@ class JointTrackerTests(unittest.TestCase):
         self.assertEqual(result.observed.shape, (1, 3))
         self.assertTrue(torch.isfinite(result.final_pos).all())
         self.assertTrue(torch.isfinite(result.association_logits).all())
+
+    def test_disabled_m1_features_do_not_change_tracker_outputs(self):
+        model = JointTracker(hist_len=4, use_m1_features=False)
+        state = make_state(initialized=True)
+        state["feat"] = torch.randn_like(state["feat"])
+        changed_measurements = self.measurements._replace(
+            feat=torch.randn_like(self.measurements.feat) * 100.0
+        )
+
+        baseline = model(self.measurements, state, dt=0.24)
+        changed = model(changed_measurements, state, dt=0.24)
+
+        torch.testing.assert_close(baseline.association_logits, changed.association_logits)
+        torch.testing.assert_close(baseline.fused_feat, torch.zeros_like(baseline.fused_feat))
+        torch.testing.assert_close(baseline.final_pos, changed.final_pos)
 
     def test_one_candidate_has_one_hard_class_and_multiple_can_share_a_track(self):
         with torch.no_grad():
@@ -150,6 +166,62 @@ class JointTrackerTests(unittest.TestCase):
     def test_teacher_ratio_requires_labels(self):
         with self.assertRaisesRegex(ValueError, "teacher_assignment_labels"):
             self.model(self.measurements, make_state(), teacher_assignment_ratio=0.5)
+
+    def test_empty_slots_do_not_corrupt_adam_moments(self):
+        with torch.no_grad():
+            self.model.pair_head[-1].weight.zero_()
+            self.model.pair_head[-1].bias.zero_()
+            self.model.clutter_head[-1].weight.zero_()
+            self.model.clutter_head[-1].bias.fill_(-5.0)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=3e-5)
+        gt = torch.tensor([[[1.0, 2.0], [0.0, 0.0], [0.0, 0.0]]])
+        result = self.model(self.measurements, make_state())
+        self.assertEqual(result.observed.tolist(), [[True, False, False]])
+        losses = tracker_losses(
+            result.association_logits, build_assignment_targets(self.measurements.pos, gt),
+            result.final_pos, result.existence_prob, result.track_confidence, gt,
+        )
+        sum(losses.values()).backward()
+        gradients = [p.grad for p in self.model.parameters() if p.grad is not None]
+        self.assertTrue(all(torch.isfinite(g).all() and g.abs().max() < 1e6 for g in gradients))
+        optimizer.step()
+        self.assertTrue(all(torch.isfinite(state["exp_avg_sq"]).all()
+                            for state in optimizer.state.values()))
+
+    def test_zero_scores_have_zero_fusion_and_finite_backward(self):
+        measurements = self.measurements._replace(score=torch.zeros(1, 50))
+        result = self.model(measurements, make_state())
+        self.assertFalse(result.observed.any())
+        torch.testing.assert_close(result.fused_pos, torch.zeros(1, 3, 2))
+        torch.testing.assert_close(result.fused_feat, torch.zeros(1, 3, 128))
+        (result.existence_prob.sum() + result.track_confidence.sum()).backward()
+        self.assertTrue(all(torch.isfinite(p.grad).all() for p in self.model.parameters()
+                            if p.grad is not None))
+
+    def test_new_track_starts_at_measurement_before_learning_correction(self):
+        measurements = self.measurements._replace(
+            pos=torch.tensor([2.0, 4.0]).expand(1, 50, 2))
+        labels = torch.ones(1, 50, dtype=torch.long)
+        result = self.model(measurements, make_state(),
+                            teacher_assignment_labels=labels, teacher_assignment_ratio=1.0)
+        torch.testing.assert_close(result.final_pos[0, 0], torch.tensor([2.0, 4.0]))
+        loss = (result.final_pos[0, 0] - torch.tensor([2.1, 4.2])).square().mean()
+        loss.backward()
+        self.assertGreater(self.model.correction_head[-1].weight.grad.abs().sum(), 0)
+
+    def test_initialized_track_keeps_learned_history_measurement_gate(self):
+        measurements = self.measurements._replace(
+            pos=torch.tensor([2.0, 4.0]).expand(1, 50, 2))
+        labels = torch.tensor([[1] * 25 + [2] * 25])
+        state = make_state(initialized=True)
+        state["initialized"][0, 1:] = False
+        with torch.no_grad():
+            self.model.correction_head[-1].weight.zero_()
+            self.model.correction_head[-1].bias.zero_()
+        result = self.model(measurements, state, dt=0.24,
+                            teacher_assignment_labels=labels, teacher_assignment_ratio=1.0)
+        torch.testing.assert_close(result.final_pos[0, 0], torch.tensor([2.12, 3.5]))
+        torch.testing.assert_close(result.final_pos[0, 1], torch.tensor([2.0, 4.0]))
 
 
 if __name__ == "__main__":

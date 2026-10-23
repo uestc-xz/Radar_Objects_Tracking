@@ -57,6 +57,7 @@ TRACKER_D_MODEL = 128
 TRACKER_ENCODER_LAYERS = 2
 TRACKER_ATTENTION_HEADS = 4
 TRACKER_FFN_DIM = 256
+TRACKER_MAX_GRAD_NORM = 5.0        # 更新前裁剪；日志保留裁剪前范数，非有限梯度直接报错
 M1_BATCH_SIZE = 64                 # 暖路径分块前向，限制显存占用
 # 保留原权重作为验证口径，训练调权不影响历史验证指标的可比性。
 TRACKER_LOSS_WEIGHTS = {

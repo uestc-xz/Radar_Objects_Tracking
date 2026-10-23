@@ -29,7 +29,8 @@ def _validate_points(name, points):
     return points
 
 
-def cluster_candidates(positions, scores, score_threshold=0.96, cluster_radius_m=0.5):
+def cluster_candidates(positions, scores, score_threshold=0.96, cluster_radius_m=0.5,
+                       return_membership=False):
     """Threshold M1 candidates and merge radius-connected points by score-weighted mean.
 
     Connectivity is transitive: if A is within the radius of B and B is within
@@ -49,11 +50,12 @@ def cluster_candidates(positions, scores, score_threshold=0.96, cluster_radius_m
 
     selected = np.flatnonzero(scores >= score_threshold)
     if not len(selected):
-        return ClusteredMeasurements(
+        empty = ClusteredMeasurements(
             np.empty((0, 2), dtype=np.float64),
             np.empty((0,), dtype=np.float64),
             np.empty((0,), dtype=np.int64),
         )
+        return (empty, []) if return_membership else empty
 
     selected_positions = positions[selected]
     selected_scores = scores[selected]
@@ -84,6 +86,7 @@ def cluster_candidates(positions, scores, score_threshold=0.96, cluster_radius_m
     centroids = []
     component_scores = []
     sizes = []
+    memberships = []
     for indices in ordered_components:
         member_scores = selected_scores[indices]
         weight_sum = float(member_scores.sum())
@@ -94,12 +97,14 @@ def cluster_candidates(positions, scores, score_threshold=0.96, cluster_radius_m
         centroids.append(centroid)
         component_scores.append(float(member_scores.max()))
         sizes.append(len(indices))
+        memberships.append(selected[indices].copy())
 
-    return ClusteredMeasurements(
+    result = ClusteredMeasurements(
         np.asarray(centroids, dtype=np.float64).reshape(-1, 2),
         np.asarray(component_scores, dtype=np.float64),
         np.asarray(sizes, dtype=np.int64),
     )
+    return (result, memberships) if return_membership else result
 
 
 def match_frame(predicted_positions, gt_positions, match_radius_m=1.0):

@@ -18,6 +18,7 @@ from original.my_track.lifecycle_tracker import LifecycleTracker
 from original.my_track.identity_recovery import IdentityRecoveryTracker
 from original.my_track.history_motion import HistoryMotionTracker
 from original.my_track.recent_priority import RecentPriorityTracker
+from original.my_track.tentative_weak import TentativeWeakLifecycleTracker
 from original.my_track.m1_temporal_baseline import TemporalCandidateTracker
 from original.my_track.tracking_diagnostics import tracking_diagnostics
 from scripts.evaluate_m1_temporal_baseline import _identity_switches, known_target_count
@@ -37,6 +38,8 @@ VARIANTS = DEFAULT_VARIANTS + (
     'history_motion', 'history_motion_recovery',
     'recent_priority', 'recent_priority_recovery',
     'recent_priority_stale', 'recent_priority_stale_recovery',
+    'tentative_weak', 'tentative_weak_recovery',
+    'tentative_weak_primary_confirm', 'tentative_weak_primary_confirm_recovery',
 )
 
 
@@ -72,6 +75,11 @@ def _tracker(variant, folder, hist_len, association_policy):
         priority = dict(priority_gate_m=.5, require_stale='_stale' in variant)
         tracker = RecentPriorityTracker(**settings, **priority)
         settings['recent_priority'] = priority
+    elif variant.startswith('tentative_weak'):
+        primary_confirmation = 'primary_confirm' in variant
+        tracker = TentativeWeakLifecycleTracker(**settings, primary_confirmation=primary_confirmation)
+        settings['tentative_weak_updates'] = True
+        settings['primary_confirmation'] = primary_confirmation
     else:
         tracker = LifecycleTracker(**settings)
     if variant.startswith('recovery_') or variant.endswith('_recovery'):
@@ -199,6 +207,7 @@ def main(argv=None):
     parser.add_argument('--hist-len', type=int, default=config.HIST_LEN)
     parser.add_argument('--variants', choices=VARIANTS, nargs='+', default=list(DEFAULT_VARIANTS))
     parser.add_argument('--association-policy', choices=('cascade', 'joint'), default='cascade')
+    parser.add_argument('--sequence', help='只评估此文件夹；默认评估全部记录')
     args = parser.parse_args(argv)
     if args.output.exists():
         parser.error('output already exists; choose a new filename')
@@ -211,10 +220,12 @@ def main(argv=None):
     records = []
     for index in range(len(dataset)):
         record = dataset[index]
+        if args.sequence is not None and record['folder'] != args.sequence:
+            continue
         frames = record['frames'][:args.max_frames] if args.max_frames else record['frames']
         records.append({**record, 'frames': frames})
     if not records:
-        parser.error('validation dataset is empty')
+        parser.error('no matching validation sequences')
     result = evaluate_records(
         records, args.variants, args.hist_len,
         progress=lambda folder, frame, length: print(f'{folder}: {frame}/{length}', flush=True),
@@ -229,6 +240,7 @@ def main(argv=None):
         'data_root': config.VAL_ROOT,
         'cache_root': str(Path(config.CACHE_ROOT) / 'fast_dataset_multi_test'),
         'max_frames_per_sequence': args.max_frames, **result,
+        'sequence_filter': args.sequence,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open('x', encoding='utf-8') as stream:

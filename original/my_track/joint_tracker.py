@@ -57,7 +57,8 @@ class JointTracker(nn.Module):
 
     def __init__(self, num_tracks=NUM_TRACKS, hist_len=HIST_LEN, feat_dim=FEAT_DIM,
                  d_model=TRACKER_D_MODEL, encoder_layers=TRACKER_ENCODER_LAYERS,
-                 attention_heads=TRACKER_ATTENTION_HEADS, ffn_dim=TRACKER_FFN_DIM):
+                 attention_heads=TRACKER_ATTENTION_HEADS, ffn_dim=TRACKER_FFN_DIM,
+                 use_m1_features=True):
         super().__init__()
         if num_tracks != 3:
             raise ValueError("the current association contract requires exactly 3 track slots")
@@ -67,6 +68,7 @@ class JointTracker(nn.Module):
         self.hist_len = hist_len
         self.feat_dim = feat_dim
         self.d_model = d_model
+        self.use_m1_features = bool(use_m1_features)
 
         self.candidate_projection = nn.Sequential(
             nn.Linear(feat_dim + 3, d_model), nn.LayerNorm(d_model), nn.GELU(),
@@ -101,6 +103,8 @@ class JointTracker(nn.Module):
         self.correction_head = nn.Sequential(
             nn.Linear(regression_dim, d_model), nn.GELU(), nn.Linear(d_model, 3),
         )
+        nn.init.zeros_(self.correction_head[-1].weight)
+        nn.init.zeros_(self.correction_head[-1].bias)
         self.existence_head = nn.Sequential(
             nn.Linear(regression_dim, d_model // 2), nn.GELU(), nn.Linear(d_model // 2, 1),
         )
@@ -176,6 +180,9 @@ class JointTracker(nn.Module):
         """
         self._validate_inputs(measurements, state, dt)
         pos, score, feat = measurements
+        if not self.use_m1_features:
+            feat = torch.zeros_like(feat)
+            state = {**state, "feat": torch.zeros_like(state["feat"])}
         batch = pos.shape[0]
         self._validate_teacher_assignment(
             teacher_assignment_labels, teacher_assignment_ratio, batch, pos.device
@@ -240,11 +247,14 @@ class JointTracker(nn.Module):
 
         track_weights = assignment_onehot[..., 1:] * score.unsqueeze(-1)
         weight_sum = track_weights.sum(dim=1)
-        denominator = weight_sum.clamp_min(torch.finfo(pos.dtype).tiny)
-        fused_pos = torch.einsum("bmk,bmd->bkd", track_weights, pos) / denominator.unsqueeze(-1)
-        fused_feat = torch.einsum("bmk,bmd->bkd", track_weights, feat) / denominator.unsqueeze(-1)
         # 有效融合权重才代表本帧对该槽的量测支持；ratio=0 时等价于原 hard assignment。
         observed = weight_sum > 0
+        # 空槽没有融合导数；不能除以 tiny，否则 ST 反向会放大到 1e38 量级。
+        denominator = torch.where(observed, weight_sum, torch.ones_like(weight_sum))
+        normalized_weights = track_weights / denominator.unsqueeze(1)
+        normalized_weights = normalized_weights * observed.unsqueeze(1)
+        fused_pos = torch.einsum("bmk,bmd->bkd", normalized_weights, pos)
+        fused_feat = torch.einsum("bmk,bmd->bkd", normalized_weights, feat)
 
         regression_context = torch.cat((
             track_context,
@@ -254,6 +264,8 @@ class JointTracker(nn.Module):
         ), dim=-1)
         correction = self.correction_head(regression_context)
         gate = correction[..., :1].sigmoid()
+        # 新槽没有可融合的历史，直接以量测为锚；残差头仍负责可学习纠偏。
+        gate = torch.where(has_history.unsqueeze(-1), gate, torch.ones_like(gate))
         corrected = predicted_pos + gate * (fused_pos - predicted_pos) + correction[..., 1:]
         final_pos = torch.where(observed.unsqueeze(-1), corrected, predicted_pos)
         existence_prob = self.existence_head(regression_context).squeeze(-1).sigmoid()
