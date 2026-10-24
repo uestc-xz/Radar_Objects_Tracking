@@ -1,5 +1,20 @@
 # 代码变更日志
 
+## 模块 30：短窗排序与可匹配性分项监督 — 2026-10-24（已验证，未推广）
+
+- 目的：检验 joint CE 中候选分支同时学习拒绝的梯度干扰，以及仅占训练查询 2.07% 的竞争样本贡献；不接入旧 tracker 闭环。
+- 依赖：基线 `65998dc`、模块 29 的冻结 M1 查询与 HIST_LEN=20；GT 仅用于离线配对/标签。用户授权自主细化实现验证，Git 仍由用户手动执行。
+- 修改文件：新增 `original/my_track/separated_association_loss.py`、`tests/my_track/test_separated_association_loss.py`、`experiments/m1_separated_association_20261024.md`；扩展 `short_window_association.py` 前向 detach 选项、`scripts/train_m1_short_window_association.py` 显式 objectives；更新 SPEC 和本日志。未修改 M1、旧联合网络/训练/损失、数据生成、默认配置或生命周期。
+- 核心逻辑：positive 候选内 CE 与有候选查询的 BCE 分开；BCE margin=`max(candidate_logits).detach()-null_logit`，拒绝头的历史编码 detach，阻断拒绝对排序头及共享编码器的梯度。balanced 版仅将竞争/其余 positive 组内均值等权；空组单组全权、无候选分项为零。max margin 是显式新目标，并非原 CE 的代数等价式。默认 joint 前向和 checkpoint 参数键不变。
+- 接口与日志：`forward(..., detach_rejection_history=False)` 数值不变；训练 CLI 新增 `--objectives joint separated separated_balanced`，共享数据，各组相同初始化/数据次序/超参数、各两轮、独立目录，禁止覆盖。原 joint NLL 与新训练目标分开，验证分项按全查询计数汇总、batch 划分不影响组权重；在线训练总均值与分项按各自计数汇总的诊断均值不可混用。记录实际第二 batch 各分项梯度路由，不写参数 .grad。
+- 输入审计：首记录 sample 1--5 形成 sample 3/4/5 查询；history/candidates float32 `[3,20,5]/[3,50,4]`、mask bool、labels int64 `[1,1,1]`，无新 GT 变换。完整 train/val 为 `122861/31184` 查询，两组 SHA-256 与模块 29 相同。无候选训练查询 2 个，BCE 分母 122859，未删除其指标。
+- 验证：新增 13 项数值/真实参数梯度/兼容/全局归约/训练落盘测试先红后绿；全套 238 项通过（18.808s），四文件 py_compile、diff 检查通过。前缀三组各两轮后，joint 参数逐张量与旧 smoke 相同；全量 joint 也完全复现旧初始/两轮共同指标、train NLL 及 epoch 2 参数。拒绝对历史/候选梯度、排序对拒绝头梯度均为零，证据见 manifest。
+- 真实命令：`python scripts/train_m1_short_window_association.py --epochs 2 --workers 4 --no-progress --objectives joint separated separated_balanced --output-dir original/my_track/runs/separated_assoc_full_20261024` 已完成；前缀同命令加 `--max-frames 200`、输出改为 `separated_assoc_smoke_20261024`。三组各两轮，不是同模型六轮；CUDA/AdamW/lr1e-3/batch512/seed7/clip5。
+- 完整结果：epoch 2 joint/分离/分离平衡的共同验证 NLL `.263005/.285078/.287571`，总体准确率 `.898955/.897095/.896197`；竞争纯排序 `822/825/829`、含拒绝 `788/793/802`（均 /958），最近观测为 821。positive 误拒 `980/853/826`，null 错接 `2047/2230/2285`。困难三人纯排序 `105/104/103`（/115），无一致局部收益。
+- 判断：分离并平衡只增加 7 个竞争纯排序正确（相对 joint），拒绝及总体未达净收益验收，不推广、不接入闭环。不能把条件候选排序当系统 IDF1/召回，也不能将两轮证据当作过拟合机制的证明。不继续阈值扫描或长训练；下一步先审计几何代理歧义/真实多目标冲突，再考虑全局一对一对照。
+- 产物与限制：两输出根目录各含三个分支的 manifest、epoch_1/2.pt；完整指纹、checkpoint SHA、逐序列结果、损失口径和计时见实验文档。条件历史由 GT 离线串接、.5m 标签门与 1m 基线拒绝门不同、独立查询无全局一对一、验证集多次探索均保留；不是独立测试结论。
+- Git 节点：未创建；建议中文备注“拆分短窗排序与可匹配性监督并记录两轮对照”。
+
 ## 模块 29：独立短窗候选排序 — 2026-10-24（已验证，未推广）
 
 - 目的：在继续闭环改动之前，直接检验历史量测对当前竞争候选排序和拒绝的贡献，避免重复模块 24 的干净 triplet 检索实验。

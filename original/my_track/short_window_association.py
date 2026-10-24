@@ -112,8 +112,8 @@ class ShortWindowAssociation(nn.Module):
             nn.init.zeros_(head.weight)
             nn.init.zeros_(head.bias)
 
-    def forward(self, history, candidates, candidate_mask):
-        """[B,H,5], [B,N,4], bool[B,N] -> logits [B,1+N]，首列 null。"""
+    def forward(self, history, candidates, candidate_mask, detach_rejection_history=False):
+        """量测 -> [B,1+N] logits；detach 选项只改变实验梯度，不改变数值。"""
         if (history.ndim != 3 or history.shape[1:] != (self.hist_len, 5) or
                 candidates.ndim != 3 or candidates.shape[0] != len(history) or
                 candidates.shape[2] != 4 or candidate_mask.shape != candidates.shape[:2] or
@@ -132,7 +132,8 @@ class ShortWindowAssociation(nn.Module):
         else:
             nearest = best_score = count.to(history.dtype)
         context = torch.stack((count.to(history.dtype) / 50., nearest, best_score), dim=1)
-        reject = base[:, :1] + self.reject(torch.cat((encoded, context), dim=-1))
+        rejection_history = encoded.detach() if detach_rejection_history else encoded
+        reject = base[:, :1] + self.reject(torch.cat((rejection_history, context), dim=-1))
         edges = torch.cat((encoded[:, None].expand(-1, candidates.shape[1], -1), candidates), dim=-1)
         ranked = base[:, 1:] + self.edge(edges).squeeze(-1)
         return masked_logits(torch.cat((reject, ranked), dim=1), candidate_mask)

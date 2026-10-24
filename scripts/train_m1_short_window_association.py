@@ -21,7 +21,47 @@ from original.my_track.short_window_association import (
     ShortWindowAssociation, baseline_logits, ranking_loss,
 )
 from original.my_track.short_window_data import collect_queries
+from original.my_track.separated_association_loss import separated_losses
 from scripts.train_m1_feature_projection import _records
+
+OBJECTIVES = ('joint', 'separated', 'separated_balanced')
+COMPONENT_COUNTS = {'ranking': 'positive_count', 'competition_ranking': 'competition_count',
+                    'other_ranking': 'other_count', 'matchability': 'matchability_count'}
+
+
+def _accumulate_components(accumulator, parts):
+    for name, count_name in COMPONENT_COUNTS.items():
+        count = parts[count_name]
+        accumulator[name] = accumulator.get(name, 0.) + float(parts[name].detach()) * count
+        accumulator[count_name] = accumulator.get(count_name, 0) + count
+
+
+def _component_summary(accumulator, balanced):
+    result = {}
+    for name, count_name in COMPONENT_COUNTS.items():
+        count = accumulator.get(count_name, 0)
+        result[count_name] = count
+        result[name] = accumulator.get(name, 0.) / count if count else 0.
+    if balanced:
+        groups = int(result['competition_count'] > 0) + int(result['other_count'] > 0)
+        result['ranking'] = (result['competition_ranking'] + result['other_ranking']) / groups if groups else 0.
+    result['total'] = result['ranking'] + result['matchability']
+    return result
+
+
+def _gradient_audit(model, parts):
+    """只读分项梯度，不更新参数或写入 .grad；检查实际训练图的参数路由。"""
+    named = list(model.named_parameters())
+    result = {}
+    for component in ('ranking', 'matchability'):
+        gradients = torch.autograd.grad(parts[component], [p for _, p in named],
+                                        retain_graph=True, allow_unused=True)
+        squares = {group: 0. for group in ('history_encoder', 'edge', 'reject')}
+        for (name, _), gradient in zip(named, gradients):
+            if gradient is not None:
+                squares[name.split('.')[0]] += float(gradient.detach().square().sum())
+        result[component] = {group: value ** .5 for group, value in squares.items()}
+    return result
 
 
 def summarize_predictions(arrays, predictions, losses, candidate_predictions=None):
@@ -54,23 +94,27 @@ def summarize_predictions(arrays, predictions, losses, candidate_predictions=Non
     return result
 
 
-def _loader(arrays, batch_size, shuffle=False, seed=7):
+def _loader(arrays, batch_size, shuffle=False, seed=7, include_competition=False):
+    names = ('history', 'candidates', 'mask', 'labels')
+    if include_competition:
+        names += ('competition',)
     dataset = TensorDataset(*(torch.from_numpy(arrays[name])
-                              for name in ('history', 'candidates', 'mask', 'labels')))
+                              for name in names))
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0,
                       generator=torch.Generator().manual_seed(seed))
 
 
-def evaluate(model, arrays, device, batch_size=2048, include_baselines=False):
+def evaluate(model, arrays, device, batch_size=2048, include_baselines=False, objective='joint'):
     """相同查询上的条件排序评估；不维护或更新 tracker 状态。"""
     methods = ['model', 'nearest_last', 'last_velocity'] if include_baselines else ['model']
     predictions = {method: [] for method in methods}
     candidate_predictions = {method: [] for method in methods}
     losses = {method: [] for method in methods}
+    components = {method: {} for method in methods}
     model.eval()
     with torch.no_grad():
-        for tensors in _loader(arrays, batch_size):
-            history, candidates, mask, labels = (tensor.to(device) for tensor in tensors)
+        for tensors in _loader(arrays, batch_size, include_competition=True):
+            history, candidates, mask, labels, competition = (tensor.to(device) for tensor in tensors)
             logits = {'model': model(history, candidates, mask)}
             if include_baselines:
                 logits['nearest_last'] = baseline_logits(history, candidates, mask)
@@ -80,11 +124,18 @@ def evaluate(model, arrays, device, batch_size=2048, include_baselines=False):
                 # 仅正样本统计“排除 null 后选谁”，区分排序退化与拒绝阈值变化。
                 candidate_predictions[method].append((logits[method][:, 1:].argmax(-1) + 1).cpu().numpy())
                 losses[method].append(F.cross_entropy(logits[method], labels, reduction='none').cpu().numpy())
+                if objective != 'joint':
+                    parts = separated_losses(logits[method], labels, mask, competition,
+                                             balanced=objective == 'separated_balanced')
+                    _accumulate_components(components[method], parts)
     result = {}
     for method in methods:
         predicted, nll = np.concatenate(predictions[method]), np.concatenate(losses[method])
         candidate_ranked = np.concatenate(candidate_predictions[method])
         result[method] = summarize_predictions(arrays, predicted, nll, candidate_ranked)
+        if objective != 'joint':
+            result[method]['objective_components'] = _component_summary(
+                components[method], balanced=objective == 'separated_balanced')
         result[method]['per_sequence'] = {}
         for index in np.unique(arrays['sequence_indices']):
             selected = arrays['sequence_indices'] == index
@@ -96,7 +147,7 @@ def evaluate(model, arrays, device, batch_size=2048, include_baselines=False):
 
 
 def run_training(train, validation, metadata, output_dir, hist_len=config.HIST_LEN,
-                 epochs=2, batch_size=512, lr=1e-3, device='cpu', seed=7, progress=True):
+                 epochs=2, batch_size=512, lr=1e-3, device='cpu', seed=7, progress=True, objective='joint'):
     """每轮落盘独立 checkpoint/指标；不覆盖已有实验，不自动挑验证最优模型。"""
     for name, value in [('epochs', epochs), ('batch_size', batch_size)]:
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -105,6 +156,8 @@ def run_training(train, validation, metadata, output_dir, hist_len=config.HIST_L
         raise ValueError('lr must be finite and positive')
     if not len(train['labels']) or not len(validation['labels']):
         raise ValueError('train and validation must both contain queries')
+    if objective not in OBJECTIVES:
+        raise ValueError(f'objective must be one of {OBJECTIVES}')
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     torch.manual_seed(seed)
@@ -114,11 +167,11 @@ def run_training(train, validation, metadata, output_dir, hist_len=config.HIST_L
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     report = {'schema': 1, 'task': 'conditional_short_window_ranking_not_closed_loop',
               'metadata': metadata, 'settings': {'hist_len': hist_len, 'epochs': epochs,
-                'batch_size': batch_size, 'lr': lr, 'seed': seed, 'device': str(device),
+                'batch_size': batch_size, 'lr': lr, 'seed': seed, 'device': str(device), 'objective': objective,
                 'label_radius_m': .5, 'logit_temperature_m': .25, 'null_radius_m': 1.,
                 'train_queries': len(train['labels']), 'val_queries': len(validation['labels']),
                 'parameters': sum(parameter.numel() for parameter in model.parameters())},
-              'initial_validation': evaluate(model, validation, device, include_baselines=True),
+              'initial_validation': evaluate(model, validation, device, include_baselines=True, objective=objective),
               'history': []}
     def save_manifest():
         with (output_dir / 'manifest.json').open('w', encoding='utf-8') as handle:
@@ -134,13 +187,23 @@ def run_training(train, validation, metadata, output_dir, hist_len=config.HIST_L
         started = time.perf_counter()
         model.train()
         total_loss = total_grad = 0.
+        component_totals = {}
         count = batches = 0
-        loader = tqdm(_loader(train, batch_size, shuffle=True, seed=seed + epoch),
+        loader = tqdm(_loader(train, batch_size, shuffle=True, seed=seed + epoch, include_competition=True),
                       desc=f'Epoch {epoch}/{epochs} [rank train]', disable=not progress, unit='batch')
         for tensors in loader:
-            history, candidates, mask, labels = (tensor.to(device) for tensor in tensors)
+            history, candidates, mask, labels, competition = (tensor.to(device) for tensor in tensors)
             optimizer.zero_grad(set_to_none=True)
-            loss = ranking_loss(model(history, candidates, mask), labels, mask)
+            if objective == 'joint':
+                loss = ranking_loss(model(history, candidates, mask), labels, mask)
+            else:
+                logits = model(history, candidates, mask, detach_rejection_history=True)
+                parts = separated_losses(logits, labels, mask, competition,
+                                         balanced=objective == 'separated_balanced')
+                loss = parts['total']
+                _accumulate_components(component_totals, parts)
+                if epoch == 1 and batches == min(1, len(loader) - 1):
+                    report['gradient_audit'] = {'batch_index': batches, 'routes': _gradient_audit(model, parts)}
             if not torch.isfinite(loss):
                 raise FloatingPointError('nonfinite ranking loss')
             loss.backward()
@@ -152,17 +215,26 @@ def run_training(train, validation, metadata, output_dir, hist_len=config.HIST_L
             batches += 1
             if progress:
                 loader.set_postfix(loss=f'{total_loss / count:.5f}', grad=f'{float(grad):.3f}')
-        validation_metrics = evaluate(model, validation, device)
-        entry = {'epoch': epoch, 'train_nll': total_loss / count,
+        validation_metrics = evaluate(model, validation, device, objective=objective)
+        entry = {'epoch': epoch, 'train_objective': total_loss / count,
                  'mean_preclip_grad': total_grad / batches,
                  'validation': validation_metrics['model'], 'seconds': time.perf_counter() - started}
+        if objective == 'joint':
+            entry['train_nll'] = total_loss / count
+        else:
+            entry['train_components'] = _component_summary(component_totals, objective == 'separated_balanced')
         report['history'].append(entry)
         torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch, 'hist_len': hist_len, 'seed': seed}, output_dir / f'epoch_{epoch}.pt')
+                    'epoch': epoch, 'hist_len': hist_len, 'seed': seed, 'objective': objective},
+                   output_dir / f'epoch_{epoch}.pt')
         save_manifest()
         val = entry['validation']
-        print(f"epoch {epoch}/{epochs}: train_nll={entry['train_nll']:.5f} "
-              f"val_nll={val['all']['nll']:.5f} accuracy={val['all']['accuracy']:.4f} "
+        train_name = 'train_nll' if objective == 'joint' else 'train_objective'
+        component_text = '' if objective == 'joint' else (
+            f" train_rank={entry['train_components']['ranking']:.5f}"
+            f" train_match={entry['train_components']['matchability']:.5f}")
+        print(f"{objective} epoch {epoch}/{epochs}: {train_name}={entry['train_objective']:.5f}"
+              f"{component_text} val_joint_nll={val['all']['nll']:.5f} accuracy={val['all']['accuracy']:.4f} "
               f"competition={val['competition']['accuracy']} "
               f"competition_rank={val['competition']['ranking_accuracy']} null={val['null']['accuracy']} "
               f"({entry['seconds']:.1f}s)", flush=True)
@@ -181,9 +253,13 @@ def main(argv=None):
     parser.add_argument('--seed', type=int, default=7)
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--no-progress', action='store_true', help='hide per-batch bars, keep epoch summaries')
+    parser.add_argument('--objectives', nargs='+', choices=OBJECTIVES, default=['joint'],
+                        help='one objective writes output-dir; multiple write one subdirectory each')
     args = parser.parse_args(argv)
     if args.output_dir.exists():
         parser.error(f'output directory already exists: {args.output_dir}')
+    if len(set(args.objectives)) != len(args.objectives):
+        parser.error('objectives must be distinct')
     if (args.epochs < 1 or args.batch_size < 1 or args.workers < 0 or
             args.max_sequences < 0 or args.max_frames < 0 or not np.isfinite(args.lr) or args.lr <= 0):
         parser.error('epochs/batch-size/lr must be positive; limits/workers must be nonnegative')
@@ -202,9 +278,14 @@ def main(argv=None):
                         'collection_seconds': time.perf_counter() - started})
         metadata['splits'][split] = details
         print(f"{split}: {details['queries']} queries ({details['collection_seconds']:.1f}s)", flush=True)
-    run_training(collected['train'], collected['validation'], metadata, args.output_dir,
-                 epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
-                 device=args.device, seed=args.seed, progress=not args.no_progress)
+    if len(args.objectives) > 1:
+        args.output_dir.mkdir(parents=True, exist_ok=False)
+    for objective in args.objectives:
+        output = args.output_dir / objective if len(args.objectives) > 1 else args.output_dir
+        print(f'training objective={objective}: {output}', flush=True)
+        run_training(collected['train'], collected['validation'], metadata, output,
+                     epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
+                     device=args.device, seed=args.seed, progress=not args.no_progress, objective=objective)
 
 
 if __name__ == '__main__':
