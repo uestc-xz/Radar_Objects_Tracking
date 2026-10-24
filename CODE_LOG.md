@@ -1,5 +1,23 @@
 # 代码变更日志
 
+## 模块 29：独立短窗候选排序 — 2026-10-24（已验证，未推广）
+
+- 目的：在继续闭环改动之前，直接检验历史量测对当前竞争候选排序和拒绝的贡献，避免重复模块 24 的干净 triplet 检索实验。
+- 依赖：用户已提交 `d7a1b0b`；原主/弱提议、gated_pairs、HIST_LEN=20、冻结 M1 冷缓存与序列内 GT 槽。
+- 修改文件：新增 `original/my_track/short_window_association.py`、`short_window_data.py`、`scripts/train_m1_short_window_association.py`、`tests/my_track/test_short_window_association.py`、`experiments/m1_short_window_association_20261024.md`；更新 SPEC。本轮未改旧网络/训练/损失/配置或生命周期实现。
+- 核心逻辑：GT 只离线挑选配对量测及当前标签；先构造查询再插入当前观测、按真实 sample 差编码最近 H 步、不跨文件夹。相对米制历史 `[H,5]` 与当前提议 `[N,4]` 输入 12,162 参数 MLP，候选共享排序/null，末层零初始化保留最近观测基线。损失为一个 masked listwise CE；不混旧权重。没有当前配对仍生成 null 标签，几何歧义保留并单列。
+- 输入/输出审计：首条训练 `20240913_1_3` sample 1--3，out/conf/feat float32 `[50,4]/[50,2]/[50,128]`，label float32 `[10,6]`、有限；首帧有效 GT `[-1.348257,1.786320]m`，不加 y 偏移。全量 loader 验证 out/conf/label shape/dtype/有限；模型不读 feat 或 GT 坐标/ID。历史和当前相对坐标范围、query 指纹及详细样本计数见实验文档与 manifest。
+- 样本规模：25 条训练 59,525 帧 → 122,861 查询，其中 positive/null/竞争/当前歧义 `101308/21553/2548/191`；8 条验证 17,421 帧 → 31,184 查询，对应 `24674/6510/958/139`。未满两次历史的目标不生成查询，不能把条件正确率冒充召回或闭环 IDF1。
+- 验证命令：`python -B -m unittest discover -s tests/my_track -q`；四个新增 Python 文件 py_compile 与 `git diff --check`。真实 smoke：训练脚本 `--epochs 2 --max-frames 200 --workers 4 --output-dir original/my_track/runs/short_window_assoc_smoke_20261024`；完整：`--epochs 2 --workers 4 --no-progress --output-dir original/my_track/runs/short_window_assoc_full_20261024`，均已完成。
+- 数值测试：log(2)/2 手算 CE、padding 零梯度、无候选 CE=0、非法标签/NaN 拒绝、限速真实 gap、置换/平移、时间因果/跨序列、序列 GT 槽置换、null/歧义、串并行逐位等价与 checkpoint/覆盖保护共 15 项；先红后绿。全套 225 项通过。额外相反历史同当前候选的合成学习检查 CE `.737507→.002893`、输出 `[2,1]`，仅证明历史通路可学习。
+- 完整训练：CUDA，AdamW lr=1e-3，batch512，seed7，两轮 train/val CE `.25059/.26804`、`.22812/.26300`；平均裁剪前梯度 `.09476/.10272`。数据构造 train/val 约 `81.0/22.8s`，每轮训练及验证约 `2.6s`。没有继续到长训练，没有覆盖旧产物。
+- 结果：最近观测 vs epoch 2，全部正确率 `.85816→.89895`、positive `.98699→.95526`、null `.36989→.68556`、竞争 `.85699→.82255`。错误接收 `4102→2047`，误拒 positive `153→980`。更少错选不能直接归因身份学习；固定 epoch 2、同一验证指纹重评，排除 null 的竞争纯排序仅 `821/958→822/958`，困难三人 `102/115→105/115`。不足以推广。
+- 诊断补充：当前 evaluate 另输出 positive 的 candidate-only 排序计数和准确率，自动拆分排序/拒绝；新增接口测试先因缺失字段失败后通过。补充前的完整 JSON 保留不覆盖，冻结 checkpoint 的只读重评数字已记实验文档。一次临时 PowerShell 双层引号导致只读诊断在 Python 解析前失败，改 stdin 多行后完成；未发生训练更新或数据写入。
+- 产物：各目录 manifest、epoch_1/2.pt；完整 epoch 2 SHA-256 `4a903e0f454a7ed13dc36a28b7a8bbb63232c8af2384b8230747a270e336f5ee`。缓存指纹、逐序列对照、完整设置/限制和所有训练命令在实验文档中。
+- 已知限制：条件历史有几何代理歧义；独立查询没有跨轨一对一约束，主弱联合竞争不同于原 cascade；null 标签 .5m 与固定基线拒绝门 1m 不同，未证明优于简单拒绝标定。竞争样本仅训练查询 2.07%，整体 CE 下降不能证明身份改善。已多次探索的验证集不能当独立测试。
+- 选择：不接入默认系统；下一轮先分开条件候选排序和可匹配性监督、明确竞争样本贡献。后续未实现，不把建议写成收益。
+- Git 节点：未创建，用户手动提交；建议中文备注“新增独立短窗关联学习并记录完整两轮排序与拒绝对照”。
+
 ## 模块 28：训练集标定的卡尔曼关联预测 — 2026-10-24（已验证，失败对照）
 
 - 目的：独立检验递归状态估计能否缓解原始量测覆盖关联位置后的扰动；不叠加历史拟合、优先级、滞回或暂定弱续接。
