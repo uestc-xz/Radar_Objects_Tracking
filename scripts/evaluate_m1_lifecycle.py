@@ -17,11 +17,13 @@ from original.my_track import config
 from original.my_track.lifecycle_tracker import LifecycleTracker
 from original.my_track.identity_recovery import IdentityRecoveryTracker
 from original.my_track.history_motion import HistoryMotionTracker
+from original.my_track.kalman_motion import KalmanMotionTracker, validate_motion_noise
 from original.my_track.recent_priority import RecentPriorityTracker
 from original.my_track.tentative_weak import TentativeWeakLifecycleTracker
 from original.my_track.m1_temporal_baseline import TemporalCandidateTracker
 from original.my_track.tracking_diagnostics import tracking_diagnostics
 from scripts.evaluate_m1_temporal_baseline import _identity_switches, known_target_count
+from scripts.calibrate_m1_motion_noise import load_motion_noise
 
 
 DEFAULT_VARIANTS = (
@@ -40,10 +42,11 @@ VARIANTS = DEFAULT_VARIANTS + (
     'recent_priority_stale', 'recent_priority_stale_recovery',
     'tentative_weak', 'tentative_weak_recovery',
     'tentative_weak_primary_confirm', 'tentative_weak_primary_confirm_recovery',
+    'kalman_motion', 'kalman_motion_recovery',
 )
 
 
-def _tracker(variant, folder, hist_len, association_policy):
+def _tracker(variant, folder, hist_len, association_policy, motion_noise=None):
     if variant.startswith('simple_'):
         settings = dict(score_threshold=.8, cluster_radius_m=.75,
                         association_radius_m=1., max_missed=int(variant[-1]), max_tracks=3)
@@ -68,7 +71,11 @@ def _tracker(variant, folder, hist_len, association_policy):
         settings['association_policy'] = 'cascade'
     if variant == 'lifecycle_joint':
         settings['association_policy'] = 'joint'
-    if variant.startswith('history_motion'):
+    if variant.startswith('kalman_motion'):
+        noise = validate_motion_noise(motion_noise)
+        tracker = KalmanMotionTracker(**settings, **noise)
+        settings['kalman_motion'] = noise
+    elif variant.startswith('history_motion'):
         tracker = HistoryMotionTracker(**settings, min_motion_points=4)
         settings['history_motion'] = dict(window_steps=hist_len, min_motion_points=4)
     elif variant.startswith('recent_priority'):
@@ -113,13 +120,17 @@ def _summarize(sequences, metric_key='metrics'):
 
 
 def evaluate_records(records, variants=DEFAULT_VARIANTS, hist_len=config.HIST_LEN, progress=None,
-                     association_policy='cascade'):
+                     association_policy='cascade', motion_noise=None):
     """每条记录重置所有方法；完整保留标签原槽、确认前缀和输出指纹。"""
     variants = tuple(variants)
     if not variants or len(set(variants)) != len(variants) or any(v not in VARIANTS for v in variants):
         raise ValueError('variants must be a non-empty unique selection of supported names')
     if association_policy not in ('joint', 'cascade'):
         raise ValueError('association_policy must be joint or cascade')
+    if any(name.startswith('kalman_motion') for name in variants):
+        motion_noise = validate_motion_noise(motion_noise)
+    elif motion_noise is not None:
+        raise ValueError('motion_noise requires an explicit kalman_motion variant')
     result = {'variants': {name: {'sequences': []} for name in variants}, 'data_checks': []}
     for record in records:
         folder = record['folder']
@@ -129,7 +140,7 @@ def evaluate_records(records, variants=DEFAULT_VARIANTS, hist_len=config.HIST_LE
         hashes = {name: hashlib.sha256() for name in variants}
         evidence_hashes = {name: hashlib.sha256() for name in variants}
         for name in variants:
-            trackers[name], settings[name] = _tracker(name, folder, hist_len, association_policy)
+            trackers[name], settings[name] = _tracker(name, folder, hist_len, association_policy, motion_noise)
         targets, sample_ids = [], []
         lower, upper = np.full(2, np.inf), np.full(2, -np.inf)
         first_shapes = None
@@ -208,11 +219,16 @@ def main(argv=None):
     parser.add_argument('--variants', choices=VARIANTS, nargs='+', default=list(DEFAULT_VARIANTS))
     parser.add_argument('--association-policy', choices=('cascade', 'joint'), default='cascade')
     parser.add_argument('--sequence', help='只评估此文件夹；默认评估全部记录')
+    parser.add_argument('--motion-noise', type=Path, help='kalman_motion 必需的训练集标定 JSON')
     args = parser.parse_args(argv)
     if args.output.exists():
         parser.error('output already exists; choose a new filename')
     if args.max_frames < 0 or args.hist_len < 1:
         parser.error('max-frames must be non-negative; hist-len must be positive')
+    needs_noise = any(name.startswith('kalman_motion') for name in args.variants)
+    if needs_noise != (args.motion_noise is not None):
+        parser.error('--motion-noise is required exactly when selecting kalman_motion variants')
+    motion_noise = load_motion_noise(args.motion_noise) if needs_noise else None
     dataset = TrackSequenceColdDataset(
         config.VAL_ROOT, str(Path(config.CACHE_ROOT) / 'fast_dataset_multi_test'),
         config.WINDOW_SIZE, config.STRIDE, full_sequence=True,
@@ -230,6 +246,7 @@ def main(argv=None):
         records, args.variants, args.hist_len,
         progress=lambda folder, frame, length: print(f'{folder}: {frame}/{length}', flush=True),
         association_policy=args.association_policy,
+        motion_noise=motion_noise,
     )
     payload = {
         'schema_version': 2,
@@ -241,6 +258,9 @@ def main(argv=None):
         'cache_root': str(Path(config.CACHE_ROOT) / 'fast_dataset_multi_test'),
         'max_frames_per_sequence': args.max_frames, **result,
         'sequence_filter': args.sequence,
+        'motion_noise_file': str(args.motion_noise) if args.motion_noise else None,
+        'motion_noise_sha256': (hashlib.sha256(args.motion_noise.read_bytes()).hexdigest()
+                                if args.motion_noise else None),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open('x', encoding='utf-8') as stream:
