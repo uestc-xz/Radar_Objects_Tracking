@@ -5,10 +5,65 @@ import unittest
 
 import numpy as np
 
-from scripts.evaluate_m1_lifecycle import evaluate_records, main
+from scripts.evaluate_m1_lifecycle import DEFAULT_VARIANTS, VARIANTS, evaluate_records, main
 
 
 class LifecycleEvaluationTests(unittest.TestCase):
+    def test_known_no_death_recovery_is_explicit_opt_in_and_records_its_prior(self):
+        name = 'lifecycle_known_no_death_recovery'
+        self.assertIn(name, VARIANTS)
+        self.assertNotIn(name, DEFAULT_VARIANTS)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache, label = root / 'cache.npz', root / 'label.npy'
+            np.savez(cache, out=np.asarray([[1., 2., .4, .4]], dtype=np.float32),
+                     conf=np.asarray([[0., 10.]], dtype=np.float32))
+            np.save(label, np.tile([1., 2., 0., 0., 0., 0.], (10, 1)).astype(np.float32))
+            record = {'folder': '20240913_1_1', 'frames': [(cache, label, i) for i in range(4)]}
+            variants = evaluate_records([record], [name], hist_len=3)['variants']
+            data = variants[name]
+            self.assertGreater(data['summary']['tp'], 0)
+            settings = data['sequences'][0]['settings']
+            self.assertTrue(settings['no_death'])
+            self.assertEqual(settings['max_tracks'], 1)
+            self.assertEqual(settings['identity_recovery']['known_count'], 1)
+
+    def test_known_no_death_coast_uses_hist_len_only_when_explicitly_selected(self):
+        name = 'lifecycle_known_no_death_coast'
+        self.assertIn(name, VARIANTS)
+        self.assertNotIn(name, DEFAULT_VARIANTS)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache, label = root / 'cache.npz', root / 'label.npy'
+            np.savez(cache, out=np.asarray([[1., 2., .4, .4]], dtype=np.float32),
+                     conf=np.asarray([[0., 10.]], dtype=np.float32))
+            np.save(label, np.tile([1., 2., 0., 0., 0., 0.], (10, 1)).astype(np.float32))
+            record = {'folder': '20240913_1_1', 'frames': [(cache, label, i) for i in range(4)]}
+            data = evaluate_records([record], [name], hist_len=3)['variants'][name]
+            settings = data['sequences'][0]['settings']
+            self.assertTrue(settings['no_death'])
+            self.assertEqual(settings['max_tracks'], 1)
+            self.assertEqual(settings['output_max_missed'], 3)
+            self.assertEqual(settings['output_confidence'], .5)
+
+    def test_known_no_death_persistent_coast_disables_confidence_floor_as_opt_in(self):
+        name = 'lifecycle_known_no_death_persistent_coast'
+        self.assertIn(name, VARIANTS)
+        self.assertNotIn(name, DEFAULT_VARIANTS)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache, label = root / 'cache.npz', root / 'label.npy'
+            np.savez(cache, out=np.asarray([[1., 2., .4, .4]], dtype=np.float32),
+                     conf=np.asarray([[0., 10.]], dtype=np.float32))
+            np.save(label, np.tile([1., 2., 0., 0., 0., 0.], (10, 1)).astype(np.float32))
+            record = {'folder': '20240913_1_1', 'frames': [(cache, label, i) for i in range(4)]}
+            data = evaluate_records([record], [name], hist_len=3)['variants'][name]
+            settings = data['sequences'][0]['settings']
+            self.assertTrue(settings['no_death'])
+            self.assertEqual(settings['max_tracks'], 1)
+            self.assertEqual(settings['output_max_missed'], 3)
+            self.assertEqual(settings['output_confidence'], 0.)
+
     def test_real_cache_adapter_counts_startup_and_aggregates_micro_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

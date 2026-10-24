@@ -1,5 +1,36 @@
 # 代码变更日志
 
+## 模块 34：低置信持续 coast 输出 — 2026-10-24（已验证，未推广）
+
+- 目的：确认模块 33 的 `.5` coast 置信门是否掩盖长漏检期间的身份/坐标输出能力。
+- 修改：新增显式 opt-in `lifecycle_known_no_death_persistent_coast`，固定人数/no-death，`output_max_missed=HIST_LEN`、`output_confidence=0`。不加入默认变体、不改默认跟踪器。新增一项设置契约测试。
+- 全量 coast TP/FP `1048/1225→1149/3403`；P/R/F1 `.8980/.6646/.7639→.8234/.6674/.7373`，identity-F1 `.6053→.5837`，MAE `.2814→.2828m`。困难序列 F1/identity-F1 均退化。低置信 coast 不推广。
+- 全套测试与数据命令、解释见 `experiments/m1_persistent_coast_20261024.md`；JSON 为 `known_no_death_persistent_coast_{hard,full}_20261024.json`。Git 仍由用户手动执行。
+
+## 模块 33：已知人数无消亡下延长 coast 输出 — 2026-10-24（已验证，未推广）
+
+- 目的：检验已知固定人数/no-death 条件下，将 coast 输出期限从 2 帧放宽到 HIST_LEN 能否减少漏检并维持身份。
+- 修改：评估器新增显式 opt-in `lifecycle_known_no_death_coast`，只将 `output_max_missed=hist_len`，保留 confidence threshold `.5`；未更改默认变体、其他状态机或输出坐标。
+- 全 8 序列：相对 known_no_death，P/R/F1 `.9309/.6542/.7684 → .8980/.6646/.7639`，identity-F1 `.6091→.6053`，GT_IDSW `155→153`。困难三目标 identity-F1 `.3932→.4012`、F1 `.6551→.6632`，但 IDSW `62→64`。少量召回改善伴随假点增加，整体身份与 F1 略退，不推广。
+- 新增一项设置契约测试；详细结果见 `experiments/m1_known_no_death_recovery_20261024.md` 与 `known_no_death_coast_{hard,full}_20261024.json`。Git 仍由用户手动执行。
+
+## 模块 32：已知人数无消亡与身份恢复组合 — 2026-10-24（已验证，未推广）
+
+- 目的：在用户接受的固定人数/序列内无目标消亡理想化下，检查是否叠加独立身份恢复可缓解长遮挡后的片段切换。
+- 修改：生命周期评估器新增显式 opt-in `lifecycle_known_no_death_recovery`；已知人数只设置 max_tracks 及恢复器唯一缺失先验，GT 不进入逐帧推理。未放入默认变体，原默认不变。新增一项评估契约测试。
+- 困难三目标结果：`lifecycle_known_no_death` 与组合均 P/R/F1 `.8655/.5270/.6551`、identity-F1 `.3932`、GT_IDSW 62。
+- 完整八序列：两者均 P/R/F1 `.9309/.6542/.7684`、identity-F1 `.6091`、GT_IDSW 155；新变体 recovered 恒为 0，prediction/evidence digest 与无恢复版相同。既有 no-death digest 也完全复现。这说明只要旧轨迹状态一直保留且重新关联成功，外层片段身份恢复没有额外作用；长漏检时输出召回仍显著下降。
+- 全 `tests/my_track` 252 项通过。命令/限制/JSON 见 `experiments/m1_known_no_death_recovery_20261024.md`。建议中文提交备注：“验证固定人数无消亡场景下身份恢复的增益”。Git 仍由用户手动执行。
+
+## 模块 31：代理竞争监督审计与冻结排序闭环 — 2026-10-24（已验证，未推广）
+
+- 目的：核查模块 29/30 的几何代理竞争标签，并测量冻结短窗排序器能否在自主历史、跨轨一对一和原生命周期管理中改善身份连续性。
+- 修改：新增 `original/my_track/short_window_closed_loop.py`（自主真实量测历史与冻结排序代价）、`association_audit.py`（离线审计）、两个独立评估脚本及 13 项测试；扩展 `LifecycleTracker._association_pairs` 为默认等价扩展点。未改原 M1、状态机/阈值、训练与损失、配置或默认关联。
+- 验证集标签：17,421 帧/31,184 查询；positive 24,674，competition 958（单目标 329，多目标 629），competition 中当前歧义 126、HIST_LEN 历史歧义 232、共享 GT 候选 0、最近候选冲突 37。分组可重叠。positive conditional ranking 约 99%，远高于系统指标但不能代表系统关联或召回。
+- 闭环：困难 `20240913_3_8` 中 cascade recovery F1/identity-F1/IDSW `.7489/.2051/73`；joint/separated/balanced ranking recovery 分别 `.7363/.1563/83`、`.7431/.1816/81`、`.7332/.1707/100`。全 8 序列 cascade recovery `.8856/.4885/187`；三个学习版本 `.8726/.3613/222`、`.8819/.4339/174`、`.8813/.4592/226`。学习排序未通过多人困难序列与整体身份 F1 验收，不推广。
+- 基线保护：完整 cascade/joint 的逐序列预测 digest 与既有实验完全一致；recovery 与否的 evidence digest 完全一致。全套 251 tests 通过，py_compile 与 diff 检查通过。
+- 详细口径、分组结果与限制：`experiments/m1_association_closed_loop_20261024.md`；JSON 留存在 `original/my_track/runs/short_window_*_20261024.json`。建议中文提交备注：“审计短窗代理竞争并完成冻结排序闭环验证”。Git 仍由用户手动执行。
+
 ## 模块 30：短窗排序与可匹配性分项监督 — 2026-10-24（已验证，未推广）
 
 - 目的：检验 joint CE 中候选分支同时学习拒绝的梯度干扰，以及仅占训练查询 2.07% 的竞争样本贡献；不接入旧 tracker 闭环。

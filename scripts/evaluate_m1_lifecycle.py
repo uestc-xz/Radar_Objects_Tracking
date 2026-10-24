@@ -37,6 +37,9 @@ DEFAULT_VARIANTS = (
 
 # 新策略显式 opt-in，保留旧默认对照及 --association-policy joint 的可复现性。
 VARIANTS = DEFAULT_VARIANTS + (
+    'lifecycle_known_no_death_recovery',
+    'lifecycle_known_no_death_coast',
+    'lifecycle_known_no_death_persistent_coast',
     'history_motion', 'history_motion_recovery',
     'recent_priority', 'recent_priority_recovery',
     'recent_priority_stale', 'recent_priority_stale_recovery',
@@ -57,10 +60,20 @@ def _tracker(variant, folder, hist_len, association_policy, motion_noise=None):
                     output_max_missed=2, confidence_decay=.95, output_confidence=.5,
                     velocity_alpha=.2, max_step_m=.2, prediction_decay=.8,
                     no_death=False, weak_updates=True, association_policy=association_policy)
-    if variant in ('lifecycle_known', 'lifecycle_known_no_death', 'recovery_known'):
+    if variant in ('lifecycle_known', 'lifecycle_known_no_death', 'lifecycle_known_no_death_coast',
+                   'lifecycle_known_no_death_persistent_coast',
+                   'recovery_known',
+                   'lifecycle_known_no_death_recovery'):
         settings['max_tracks'] = known_target_count(folder)
-    if variant == 'lifecycle_known_no_death':
+    if variant in ('lifecycle_known_no_death', 'lifecycle_known_no_death_recovery',
+                   'lifecycle_known_no_death_coast',
+                   'lifecycle_known_no_death_persistent_coast'):
         settings['no_death'] = True
+    if variant in ('lifecycle_known_no_death_coast',
+                   'lifecycle_known_no_death_persistent_coast'):
+        settings['output_max_missed'] = hist_len
+    if variant == 'lifecycle_known_no_death_persistent_coast':
+        settings['output_confidence'] = 0.
     if variant == 'lifecycle_no_weak':
         settings['weak_updates'] = False
     if variant == 'lifecycle_no_coast':
@@ -93,7 +106,8 @@ def _tracker(variant, folder, hist_len, association_policy, motion_noise=None):
         recovery = dict(memory_steps=hist_len * 50, gate_m=1.,
                         gate_growth_m=0. if variant == 'recovery_local' else .02,
                         max_gate_m=7.64, ambiguity_margin_m=.5,
-                        known_count=known_target_count(folder) if variant == 'recovery_known' else None)
+                        known_count=known_target_count(folder)
+                        if variant in ('recovery_known', 'lifecycle_known_no_death_recovery') else None)
         tracker = IdentityRecoveryTracker(tracker, **recovery)
         settings['identity_recovery'] = recovery
     return tracker, settings

@@ -147,6 +147,11 @@ class LifecycleTracker:
         """仅由显式实验子类维护外观状态。"""
         return None
 
+    def _association_pairs(self, indices, points, scores, gate_m, pairwise_penalty):
+        """默认配对公式不变；冻结模型实验可独立替换边排序。"""
+        return gated_pairs(self._association_predictions(indices), points, gate_m,
+                           .1 * (1 - scores), pairwise_penalty)
+
     def update(self, candidate_positions, candidate_scores, candidate_features=None):
         """输入本帧候选，输出已确认且当前仍允许报告的航迹点。"""
         primary, weak = self._proposals(candidate_positions, candidate_scores)
@@ -159,17 +164,16 @@ class LifecycleTracker:
                       feature_values=None):
             if not indices or not available:
                 return
-            predicted = self._association_predictions(indices)
-            points = proposals.positions[available]
-            penalty = .1 * (1 - proposals.scores[available])
             gate = self.association_radius_m if radius_m is None else radius_m
+            points = proposals.positions[available]
             feature_set = (primary_features if proposals is primary else weak_features
                            if proposals is weak else feature_values)
             self._current_proposal_positions = points
             pair_penalty = self._association_pairwise_penalty(
                 indices, None if feature_set is None else feature_set[available], gate,
             )
-            for row, col in gated_pairs(predicted, points, gate, penalty, pair_penalty):
+            for row, col in self._association_pairs(
+                    indices, points, proposals.scores[available], gate, pair_penalty):
                 index, proposal_index = indices[row], available[col]
                 self._observe(self._tracks[index], proposals.positions[proposal_index],
                               proposals.scores[proposal_index])
