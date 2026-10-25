@@ -62,8 +62,8 @@ class MCDLoss(nn.Module):
         intersection = (masked_probabilities * masked_targets).sum(dim=(0, 1))
         squared_sum = (masked_probabilities.square() + masked_targets.square()).sum(dim=(0, 1))
         dice_per_class = (2.0 * intersection + self.smooth) / (squared_sum + self.smooth)
-        loss_dice = 1.0 - dice_per_class.sum()
-
+        # loss_dice = 1.0 - dice_per_class.sum()
+        loss_dice = 1.0 - dice_per_class.mean()
         loss = loss_mask + loss_dice
         if return_components:
             return loss, {"loss_mask": loss_mask, "loss_dice": loss_dice}

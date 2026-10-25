@@ -1,0 +1,81 @@
+{
+  "checkpoint": "comparison_experiments\\transformer-da\\runs\\best.pt",
+  "checkpoint_epoch": 20,
+  "split": "val",
+  "device": "cuda",
+  "assignment_radius_m": 1.0,
+  "matching_radius_m": 1.0,
+  "windows": 86,
+  "frames": 31418,
+  "measurements": 1570900,
+  "loss_mcd": 0.026323111796804535,
+  "loss_mask": 0.0012531152783710818,
+  "loss_dice": 0.0020613614667781602,
+  "accuracy": 0.9966312305048062,
+  "foreground_accuracy": 0.960399401206846,
+  "foreground_precision": 0.9527097366809553,
+  "foreground_recall": 0.960399401206846,
+  "foreground_f1": 0.956539114796683,
+  "foreground_true_probability": 0.941449611108539,
+  "confusion_matrix": [
+    [
+      1503377,
+      1028,
+      1135,
+      563
+    ],
+    [
+      1405,
+      34351,
+      95,
+      15
+    ],
+    [
+      648,
+      62,
+      19529,
+      64
+    ],
+    [
+      150,
+      20,
+      107,
+      8351
+    ]
+  ],
+  "class_metrics": {
+    "0": {
+      "precision": 0.9985367765246616,
+      "recall": 0.9981900308279049,
+      "f1": 0.9983633735688651,
+      "support": 1506103,
+      "predicted": 1505580
+    },
+    "1": {
+      "precision": 0.9686980062603987,
+      "recall": 0.9577594379077679,
+      "f1": 0.9631976670825915,
+      "support": 35866,
+      "predicted": 35461
+    },
+    "2": {
+      "precision": 0.9359244704303652,
+      "recall": 0.9618775550411269,
+      "f1": 0.9487235541305352,
+      "support": 20303,
+      "predicted": 20866
+    },
+    "3": {
+      "precision": 0.9286111419993328,
+      "recall": 0.9678952248493278,
+      "f1": 0.9478463197321377,
+      "support": 8628,
+      "predicted": 8993
+    }
+  },
+  "m1_target_coverage": 0.9262685442148902,
+  "m1_nearest_mae_m": 0.37942530775687805,
+  "da_target_coverage": 0.9125809435707678,
+  "da_classified_target_rate": 0.9397677048000822,
+  "da_classified_target_mae_m": 0.3032220442597251
+}
