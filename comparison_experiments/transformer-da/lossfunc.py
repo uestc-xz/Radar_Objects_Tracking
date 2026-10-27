@@ -70,6 +70,26 @@ class MCDLoss(nn.Module):
         return loss
 
 
+def velocity_regression_loss(
+    predicted_velocities: torch.Tensor,
+    velocity_targets: torch.Tensor,
+    foreground_mask: torch.Tensor,
+) -> torch.Tensor:
+    """对前景量测计算速度回归损失（SmoothL1）。
+
+    Args:
+        predicted_velocities: [B, Q, 2]，网络回归头输出的逐量测速度位移。
+        velocity_targets: [B, Q, 2]，每条 GT 航迹相邻帧位置差的逐量测复制。
+        foreground_mask: [B, Q]，True 表示该量测属于某个目标；杂波不参与回归。
+    """
+    per_dimension = F.smooth_l1_loss(
+        predicted_velocities, velocity_targets, reduction="none"
+    )
+    mask = foreground_mask.unsqueeze(-1).to(predicted_velocities.dtype)
+    masked = per_dimension * mask
+    return masked.sum() / mask.sum().clamp_min(1).to(predicted_velocities.dtype)
+
+
 def _simple_test() -> None:
     """读取一个 M1 冻结缓存 batch 并计算一次损失，供最小连通性测试。"""
     if not config.IS_COLD:

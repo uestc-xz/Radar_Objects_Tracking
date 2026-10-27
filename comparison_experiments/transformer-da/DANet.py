@@ -20,10 +20,11 @@ from torch import nn
 
 
 class DANetOutput(NamedTuple):
-    """网络输出：每个量测属于 4 个类别的 logits 与概率。"""
+    """网络输出：逐量测分类 logits/概率，以及逐量测速度回归位移。"""
 
     logits: torch.Tensor
     probabilities: torch.Tensor
+    velocities: torch.Tensor
 
 
 class SinusoidalPositionEncoding(nn.Module):
@@ -91,6 +92,8 @@ class DANet(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=encoder_layers)
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=decoder_layers)
         self.classifier = nn.Linear(d_model, num_classes)
+        # 速度回归头：与分类头共享解码器输出，回归逐量测的 (vx, vy) 位移。
+        self.velocity_head = nn.Linear(d_model, 2)
 
     def forward(self, history_states: torch.Tensor, measurements: torch.Tensor,) -> DANetOutput:
         """前向传播。
@@ -100,6 +103,10 @@ class DANet(nn.Module):
                 [x, vx, y, vy, conf_bg, conf_fg]。
             measurements: [B, num_measurements, 4]，每个量测为
                 [x, y, conf_bg, conf_fg]。
+
+        Returns:
+            DANetOutput：logits/probabilities [B, num_measurements, num_classes]，
+            以及 velocities [B, num_measurements, 2]（相邻帧位置差位移）。
         """
         batch_size, num_tracks, history_steps, state_dim = history_states.shape
         batch_size_m, num_measurements, measurement_dim = measurements.shape
@@ -111,4 +118,6 @@ class DANet(nn.Module):
         decoded = self.decoder(decoder_tokens, memory)
         logits = self.classifier(decoded)
         probabilities = logits.softmax(dim=-1)
-        return DANetOutput(logits=logits, probabilities=probabilities)
+        # 速度回归：单位为相邻帧位置差（未除以 Δt，Δt 为常数会被权重吸收）。
+        velocities = self.velocity_head(decoded)
+        return DANetOutput(logits=logits, probabilities=probabilities, velocities=velocities)

@@ -25,8 +25,8 @@ if str(ROOT) not in sys.path:
 
 import config  # noqa: E402
 from DANet import DANet  # noqa: E402
-from lossfunc import MCDLoss  # noqa: E402
-from train import build_history_states  # noqa: E402
+from lossfunc import MCDLoss, velocity_regression_loss  # noqa: E402
+from train import run_autoregressive  # noqa: E402
 from original.my_dataset.track_sequence_dataset import (  # noqa: E402
     load_track_sequence_cold_dataset,
 )
@@ -182,6 +182,8 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
         "loss_sum": 0.0,
         "loss_mask_sum": 0.0,
         "loss_dice_sum": 0.0,
+        "loss_regression_sum": 0.0,
+        "loss_total_sum": 0.0,
         "m1_target_count": 0,
         "m1_covered_target_count": 0,
         "m1_error_sum_m": 0.0,
@@ -196,17 +198,14 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
             break
         outputs, confidence_logits, _features, labels = [item.to(device) for item in batch]
         window_loss = 0.0
+        window_regression = 0.0
+        window_total = 0.0
         window_frames = 0
 
-        for frame_index in range(config.HISTORY_STEPS, outputs.shape[1]):
-            history_states = build_history_states(
-                outputs, confidence_logits, labels, frame_index
-            )
-            measurement_input = torch.cat(
-                (outputs[:, frame_index, :, :2], confidence_logits[:, frame_index]),
-                dim=-1,
-            )
-            network_output = model(history_states, measurement_input)
+        frame_indices, network_outputs, _track_states = run_autoregressive(
+            outputs, confidence_logits, model
+        )
+        for frame_index, network_output in zip(frame_indices, network_outputs):
             target_classes = build_assignment_targets(
                 outputs[:, frame_index, :, :2],
                 labels[:, frame_index],
@@ -224,6 +223,21 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
             window_loss += float(loss.item())
             totals["loss_mask_sum"] += float(components["loss_mask"].item())
             totals["loss_dice_sum"] += float(components["loss_dice"].item())
+
+            # 速度回归损失，与训练端同口径：标签为相邻帧 GT 位置差，仅前景量测参与。
+            velocity_labels = labels[:, frame_index] - labels[:, frame_index - 1]
+            foreground_mask = target_classes > 0
+            slot = (target_classes - 1).clamp(min=0)
+            velocity_target = velocity_labels.gather(
+                1, slot.unsqueeze(-1).expand(-1, -1, velocity_labels.shape[-1])
+            )
+            regression_loss = velocity_regression_loss(
+                network_output.velocities, velocity_target, foreground_mask
+            )
+            window_regression += float(regression_loss.item())
+            window_total += float(loss.item()) + config.DA_REGRESSION_WEIGHT * float(
+                regression_loss.item()
+            )
             window_frames += 1
             totals["frames"] += outputs.shape[0]
 
@@ -260,7 +274,12 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
 
         totals["windows"] += 1
         totals["loss_sum"] += window_loss / max(window_frames, 1)
-        progress.set_postfix(loss=f"{window_loss / max(window_frames, 1):.4f}")
+        totals["loss_regression_sum"] += window_regression / max(window_frames, 1)
+        totals["loss_total_sum"] += window_total / max(window_frames, 1)
+        progress.set_postfix(
+            loss=f"{window_total / max(window_frames, 1):.4f}",
+            reg=f"{window_regression / max(window_frames, 1):.4f}",
+        )
 
     total_measurements = totals["measurements"]
     foreground_measurements = totals["foreground_measurements"]
@@ -302,6 +321,8 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
         "frames": totals["frames"],
         "measurements": total_measurements,
         "loss_mcd": totals["loss_sum"] / windows,
+        "loss_regression": totals["loss_regression_sum"] / windows,
+        "loss_total": totals["loss_total_sum"] / windows,
         "loss_mask": totals["loss_mask_sum"] / frames,
         "loss_dice": totals["loss_dice_sum"] / frames,
         "accuracy": accuracy,

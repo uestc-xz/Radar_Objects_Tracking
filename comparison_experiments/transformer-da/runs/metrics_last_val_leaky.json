@@ -1,0 +1,104 @@
+{
+  "checkpoint": "comparison_experiments\\transformer-da\\runs\\last.pt",
+  "checkpoint_epoch": 30,
+  "split": "val",
+  "device": "cuda",
+  "assignment_radius_m": 1.0,
+  "matching_radius_m": 1.0,
+  "windows": 86,
+  "frames": 31418,
+  "measurements": 1570900,
+  "loss_total": 0.09072398110585495,
+  "loss_mcd": 0.04422907149660733,
+  "loss_mask": 0.01798081622098805,
+  "loss_dice": 0.026248255275619282,
+  "loss_velocity": 0.04649490959854294,
+  "da_velocity_mae_mps": 0.375686820593546,
+  "m1_difference_velocity_mae_mps": 1.23964098644999,
+  "velocity_mae_improvement_percent": 69.69390132304228,
+  "velocity_samples": 64797,
+  "velocity_by_id": {
+    "ID1": {
+      "samples": 35866,
+      "da_velocity_mae_mps": 0.3531873310098701,
+      "m1_difference_velocity_mae_mps": 1.1717369512630347
+    },
+    "ID2": {
+      "samples": 20303,
+      "da_velocity_mae_mps": 0.40362012643451706,
+      "m1_difference_velocity_mae_mps": 1.3328561717480176
+    },
+    "ID3": {
+      "samples": 8628,
+      "da_velocity_mae_mps": 0.40348431305053317,
+      "m1_difference_velocity_mae_mps": 1.302563810616597
+    }
+  },
+  "accuracy": 0.9951963842383347,
+  "foreground_accuracy": 0.927681837122089,
+  "foreground_precision": 0.943109967522789,
+  "foreground_recall": 0.927681837122089,
+  "foreground_f1": 0.9353322856209252,
+  "foreground_true_probability": 0.9102082353041036,
+  "confusion_matrix": [
+    [
+      1503243,
+      1408,
+      881,
+      571
+    ],
+    [
+      1492,
+      34198,
+      128,
+      48
+    ],
+    [
+      1797,
+      255,
+      18174,
+      77
+    ],
+    [
+      631,
+      78,
+      180,
+      7739
+    ]
+  ],
+  "class_metrics": {
+    "0": {
+      "precision": 0.9973990868937201,
+      "recall": 0.9981010594892913,
+      "f1": 0.9977499497223279,
+      "support": 1506103,
+      "predicted": 1507163
+    },
+    "1": {
+      "precision": 0.9515568045855477,
+      "recall": 0.9534935593598394,
+      "f1": 0.9525241974792841,
+      "support": 35866,
+      "predicted": 35939
+    },
+    "2": {
+      "precision": 0.9385942261013273,
+      "recall": 0.8951386494606708,
+      "f1": 0.9163515353199214,
+      "support": 20303,
+      "predicted": 19363
+    },
+    "3": {
+      "precision": 0.9174866627148784,
+      "recall": 0.8969633750579509,
+      "f1": 0.9071089491883023,
+      "support": 8628,
+      "predicted": 8435
+    }
+  },
+  "m1_target_coverage": 0.9262685442148902,
+  "m1_nearest_mae_m": 0.37942530775687805,
+  "da_target_coverage": 0.8955185527803474,
+  "da_classified_target_rate": 0.9334806591975879,
+  "da_classified_target_mae_m": 0.31840931298746583
+}

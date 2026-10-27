@@ -46,7 +46,7 @@ if str(ROOT) not in sys.path:
 
 import config  # noqa: E402
 from DANet import DANet  # noqa: E402
-from train import build_history_states  # noqa: E402
+from train import run_autoregressive  # noqa: E402
 from original.my_dataset.track_sequence_dataset import (  # noqa: E402
     TrackSequenceColdDataset,
 )
@@ -206,41 +206,21 @@ def predict_associations(sequence: dict, checkpoint_path: Path, batch_size: int)
 
     outputs = torch.from_numpy(sequence["outputs"]).unsqueeze(0).to(device)
     confidence_logits = torch.from_numpy(sequence["confidence_logits"]).unsqueeze(0).to(device)
-    labels = torch.from_numpy(sequence["labels"]).unsqueeze(0).to(device)
     frame_count, query_count = sequence["positions"].shape[:2]
     predicted_classes = np.full((frame_count, query_count), -1, dtype=np.int64)
     predicted_probabilities = np.zeros(
         (frame_count, query_count, config.NUM_CLASSES), dtype=np.float32
     )
 
-    first_frame = config.HISTORY_STEPS
-    for batch_start in range(first_frame, frame_count, max(int(batch_size), 1)):
-        batch_end = min(batch_start + max(int(batch_size), 1), frame_count)
-        history_states = torch.cat(
-            [
-                build_history_states(
-                    outputs, confidence_logits, labels, frame_index
-                )
-                for frame_index in range(batch_start, batch_end)
-            ],
-            dim=0,
-        )
-        measurement_input = torch.cat(
-            [
-                torch.cat(
-                    (outputs[:, frame_index, :, :2], confidence_logits[:, frame_index]),
-                    dim=-1,
-                )
-                for frame_index in range(batch_start, batch_end)
-            ],
-            dim=0,
-        )
-        network_output = model(history_states, measurement_input)
-        probabilities = network_output.probabilities
-        predicted_classes[batch_start:batch_end] = (
-            probabilities.argmax(dim=-1).cpu().numpy()
-        )
-        predicted_probabilities[batch_start:batch_end] = probabilities.cpu().numpy()
+    # 自回归滚动：历史由网络自己上一帧的输出维护，不依赖标签。
+    # batch_size 保留仅为兼容命令行参数，滚动必须按序逐帧处理。
+    frame_indices, network_outputs, _track_states = run_autoregressive(
+        outputs, confidence_logits, model
+    )
+    for frame_index, network_output in zip(frame_indices, network_outputs):
+        probabilities = network_output.probabilities[0]  # [50, 4]
+        predicted_classes[frame_index] = probabilities.argmax(dim=-1).cpu().numpy()
+        predicted_probabilities[frame_index] = probabilities.cpu().numpy()
 
     # 每帧每个 ID 可能有多个候选，这里选该 ID 概率最高的一个作为代表点。
     associated_positions = np.full((frame_count, config.NUM_TRACKS, 2), np.nan, dtype=np.float32)

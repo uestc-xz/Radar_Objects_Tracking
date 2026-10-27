@@ -1,6 +1,6 @@
 {
-  "checkpoint": "comparison_experiments\\transformer-da\\runs\\best.pt",
-  "checkpoint_epoch": 20,
+  "checkpoint": "runs\\best.pt",
+  "checkpoint_epoch": 9,
   "split": "val",
   "device": "cuda",
   "assignment_radius_m": 1.0,
@@ -8,74 +8,76 @@
   "windows": 86,
   "frames": 31418,
   "measurements": 1570900,
-  "loss_mcd": 0.026323111796804535,
-  "loss_mask": 0.0012531152783710818,
-  "loss_dice": 0.0020613614667781602,
-  "accuracy": 0.9966312305048062,
-  "foreground_accuracy": 0.960399401206846,
-  "foreground_precision": 0.9527097366809553,
-  "foreground_recall": 0.960399401206846,
-  "foreground_f1": 0.956539114796683,
-  "foreground_true_probability": 0.941449611108539,
+  "loss_mcd": 0.2859046316390345,
+  "loss_regression": 0.006998988490173156,
+  "loss_total": 0.2929036201292076,
+  "loss_mask": 0.0073835749450380395,
+  "loss_dice": 0.028616129784772546,
+  "accuracy": 0.9758565153733528,
+  "foreground_accuracy": 0.5193450314057749,
+  "foreground_precision": 0.5028465549960403,
+  "foreground_recall": 0.5193450314057749,
+  "foreground_f1": 0.5109626480412998,
+  "foreground_true_probability": 0.5001428294674136,
   "confusion_matrix": [
     [
-      1503377,
-      1028,
-      1135,
-      563
+      1499321,
+      4273,
+      1848,
+      661
     ],
     [
-      1405,
-      34351,
-      95,
-      15
+      2532,
+      24078,
+      6849,
+      2407
     ],
     [
-      648,
-      62,
-      19529,
-      64
+      1493,
+      8739,
+      7182,
+      2889
     ],
     [
-      150,
-      20,
-      107,
-      8351
+      631,
+      2933,
+      2672,
+      2392
     ]
   ],
   "class_metrics": {
     "0": {
-      "precision": 0.9985367765246616,
-      "recall": 0.9981900308279049,
-      "f1": 0.9983633735688651,
+      "precision": 0.9969042079765847,
+      "recall": 0.9954969879218089,
+      "f1": 0.9962001009939936,
       "support": 1506103,
-      "predicted": 1505580
+      "predicted": 1503977
     },
     "1": {
-      "precision": 0.9686980062603987,
-      "recall": 0.9577594379077679,
-      "f1": 0.9631976670825915,
+      "precision": 0.6016040776553482,
+      "recall": 0.6713321808955557,
+      "f1": 0.6345583681429456,
       "support": 35866,
-      "predicted": 35461
+      "predicted": 40023
     },
     "2": {
-      "precision": 0.9359244704303652,
-      "recall": 0.9618775550411269,
-      "f1": 0.9487235541305352,
+      "precision": 0.3871489407579106,
+      "recall": 0.35374082647884547,
+      "f1": 0.3696916662377104,
       "support": 20303,
-      "predicted": 20866
+      "predicted": 18551
     },
     "3": {
-      "precision": 0.9286111419993328,
-      "recall": 0.9678952248493278,
-      "f1": 0.9478463197321377,
+      "precision": 0.2865013774104683,
+      "recall": 0.27723690310616594,
+      "f1": 0.2817930140778701,
       "support": 8628,
-      "predicted": 8993
+      "predicted": 8349
     }
   },
   "m1_target_coverage": 0.9262685442148902,
   "m1_nearest_mae_m": 0.37942530775687805,
-  "da_target_coverage": 0.9125809435707678,
-  "da_classified_target_rate": 0.9397677048000822,
-  "da_classified_target_mae_m": 0.3032220442597251
+  "da_target_coverage": 0.5034261828896427,
+  "da_classified_target_rate": 0.8508925206427519,
+  "da_classified_target_mae_m": 1.4852345474330582
 }
