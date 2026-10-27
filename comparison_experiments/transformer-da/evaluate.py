@@ -1,7 +1,9 @@
 """加载 Transformer-DA 权重并统计验证集指标。
 
 默认评估 ``runs/best.pt``。脚本沿用训练阶段的窗口、历史状态和最近邻关联
-标签构造方式，因此输出可以直接与训练日志中的 ``val_loss`` 对照。
+标签构造方式，并采用与训练相同的"每窗口选一个最优槽位排列"的标签分配：
+模型输出的类别编号先对齐到 GT 槽位编号，再统计 MCD、混淆矩阵和目标覆盖，
+因此这里的指标是"编号对齐后"的关联质量，不是原始类别号的一致性。
 """
 
 from __future__ import annotations
@@ -26,7 +28,11 @@ if str(ROOT) not in sys.path:
 import config  # noqa: E402
 from DANet import DANet  # noqa: E402
 from lossfunc import MCDLoss, velocity_regression_loss  # noqa: E402
-from train import run_autoregressive  # noqa: E402
+from train import (  # noqa: E402
+    _masked_cross_entropy,
+    _slot_permutation_maps,
+    run_autoregressive,
+)
 from original.my_dataset.track_sequence_dataset import (  # noqa: E402
     load_track_sequence_cold_dataset,
 )
@@ -205,6 +211,14 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
         frame_indices, network_outputs, _track_states = run_autoregressive(
             outputs, confidence_logits, model
         )
+        permutation_maps = _slot_permutation_maps(
+            config.NUM_TRACKS, config.NUM_CLASSES, outputs.device
+        )
+
+        # 与训练端一致的标签分配：每个样本在整个窗口里选一个排列，把模型输出的
+        # 类别编号对齐到 GT 槽位编号，之后的 MCD、混淆矩阵和目标覆盖都用对齐后的结果。
+        frames = []
+        permutation_totals = None
         for frame_index, network_output in zip(frame_indices, network_outputs):
             target_classes = build_assignment_targets(
                 outputs[:, frame_index, :, :2],
@@ -214,15 +228,46 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
             mask = torch.ones_like(
                 target_classes, dtype=network_output.probabilities.dtype
             )
+            frames.append((frame_index, network_output, target_classes, mask))
+            with torch.no_grad():
+                per_permutation = torch.stack(
+                    [
+                        _masked_cross_entropy(
+                            network_output.probabilities[..., mapping], target_classes, mask
+                        )
+                        for mapping in permutation_maps
+                    ],
+                    dim=1,
+                )
+            permutation_totals = (
+                per_permutation
+                if permutation_totals is None
+                else permutation_totals + per_permutation
+            )
+
+        if permutation_totals is None:
+            totals["windows"] += 1
+            continue
+
+        selected_maps = permutation_maps[permutation_totals.argmin(dim=1)]
+
+        for frame_index, network_output, target_classes, mask in frames:
+            gather_index = selected_maps[:, None, :].expand(
+                -1, network_output.probabilities.shape[1], -1
+            )
+            probabilities = torch.gather(network_output.probabilities, 2, gather_index)
             loss, components = criterion(
-                network_output.probabilities,
+                probabilities,
                 target_classes,
                 mask,
                 return_components=True,
             )
             window_loss += float(loss.item())
-            totals["loss_mask_sum"] += float(components["loss_mask"].item())
-            totals["loss_dice_sum"] += float(components["loss_dice"].item())
+            # loss_mask/loss_dice 是 batch 均值，而 totals["frames"] 按 batch 元素累加，
+            # 这里乘回 batch 大小，避免除以 frames 时被稀释约 batch 倍。
+            batch_scale = outputs.shape[0]
+            totals["loss_mask_sum"] += float(components["loss_mask"].item()) * batch_scale
+            totals["loss_dice_sum"] += float(components["loss_dice"].item()) * batch_scale
 
             # 速度回归损失，与训练端同口径：标签为相邻帧 GT 位置差，仅前景量测参与。
             velocity_labels = labels[:, frame_index] - labels[:, frame_index - 1]
@@ -241,8 +286,7 @@ def evaluate(checkpoint_path: Path, split: str, max_windows: int | None,
             window_frames += 1
             totals["frames"] += outputs.shape[0]
 
-            predicted_classes = network_output.logits.argmax(dim=-1)
-            probabilities = network_output.probabilities
+            predicted_classes = probabilities.argmax(dim=-1)
             flat_target = target_classes.reshape(-1).cpu()
             flat_prediction = predicted_classes.reshape(-1).cpu()
             confusion += torch.bincount(
